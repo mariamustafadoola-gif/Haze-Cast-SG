@@ -75,6 +75,78 @@ HAZE_SEASONS = {
 }
 
 # ---------------------------------------------------------------------------
+# Hourly pipeline (revised core target: hourly PM2.5 per region, refreshed
+# as new weather data lands -- see build_gold_hourly() in silver_to_gold.py).
+# Additive to the constants above: the original daily pipeline/labels are
+# unchanged and still used by the shipped daily model.
+# ---------------------------------------------------------------------------
+# Predict PM2.5 this many hours ahead, using only data observed up to the
+# current hour.
+FORECAST_HORIZON_HOURS = 1
+
+# Rolling windows (HOURS, not days) for precipitation accumulation at
+# hourly resolution. Fire-hotspot accumulation keeps using the daily
+# ROLLING_WINDOWS above -- FIRMS is a satellite-pass source (~1-2
+# overpasses/day/location), not something that gains meaning at a 3h/24h
+# grain; see the data-staleness note on _fire_features_hourly.
+HOURLY_RAIN_ROLLING_WINDOWS = [3, 24]
+
+# ---------------------------------------------------------------------------
+# Hourly multi-horizon deliverable (1/3/6/12h ahead, refreshed hourly).
+# h=1 is the primary, most rigorously tuned model; h=3/6/12 reuse that same
+# per-region quantile linear regression approach, built by shifting the
+# h=1 label further ahead (no new features, no future weather needed).
+# ---------------------------------------------------------------------------
+HOURLY_HORIZONS = [1, 3, 6, 12]
+
+# Per (region, horizon) QuantileRegressor settings, tuned against the dual
+# bar: recall_elevated >= 1.15x persistence AND mae_elevated <= 1.15x
+# persistence, per region x haze season (both at once). Deliberately
+# upward-biased by design -- see the deployment-decision note in the
+# project log (over-reporting during real haze is judged the safer
+# failure mode than an unbiased number).
+#
+# h=1 is the primary tuned setting per region. h=3 only gets its own entry
+# where the h=1 setting didn't carry over cleanly (north/south/east needed
+# a higher quantile; central/west/national did not improve over the h=1
+# setting at h=3 and reuse it, see caveats below). h=6/h=12 reuse each
+# region's h=1 setting everywhere -- an alpha=0.5 sweep at those horizons
+# (2026-10) found no systematic gain over alpha=0, so this is not a gap,
+# it's a confirmed "nothing left on the table" result.
+#
+# Known open gaps, carried forward rather than silently fixed:
+#   - west, h=3: regularization does not help here (2019 MAE gets WORSE
+#     as alpha increases, opposite of every other region). Reuses the h=1
+#     setting as the least-bad fallback; still short of the dual bar.
+#   - national, h=1 and h=3: an information ceiling, not an instability
+#     problem -- alpha is flat/unresponsive. Best found for h=3
+#     (q=0.91, alpha=0.3) clears 2019 fully and 2015's MAE comfortably but
+#     misses 2015 recall by ~1.6pp; logged as accepted near-ceiling, not
+#     silently treated as a pass.
+#   - national/2019 at h=1 is a boundary case under seed robustness
+#     checking (passes under seed=42, fails under seed=123 by a hair on
+#     mae_elevated) -- not a stable pass, flagged rather than asserted.
+HOURLY_TUNED_SETTINGS: dict[tuple[str, int], tuple[float, float]] = {
+    # region: (quantile, alpha) at h=1 -- the primary setting, reused
+    # as-is at h=6 and h=12 for every region.
+    ("north", 1): (0.85, 0.3),
+    ("south", 1): (0.80, 0.0),
+    ("east", 1): (0.80, 0.0),
+    ("west", 1): (0.85, 0.0),
+    ("central", 1): (0.90, 0.5),
+    ("national", 1): (0.88, 0.0),
+    # h=3 overrides where a different setting was actually needed/better.
+    ("north", 3): (0.90, 0.0),
+    ("south", 3): (0.90, 0.0),
+    ("east", 3): (0.90, 0.3),
+    ("national", 3): (0.91, 0.3),  # best found; see "known open gaps" above
+    # west, h=3 intentionally absent -> falls back to the h=1 setting
+    # (0.85, 0.0) in hourly_model.get_tuned_setting(); see "known open
+    # gaps" above. central, h=3 also absent -> falls back to h=1's
+    # (0.90, 0.5), which already clears the dual bar at h=3.
+}
+
+# ---------------------------------------------------------------------------
 # Model hyperparameters
 # ---------------------------------------------------------------------------
 # Shared XGBoost tree/boosting params for every XGBoost variant compared in

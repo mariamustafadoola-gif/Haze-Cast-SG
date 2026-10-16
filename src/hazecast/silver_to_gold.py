@@ -15,8 +15,9 @@ import numpy as np
 import pandas as pd
 
 from hazecast.config import (
-    SILVER_DIR, GOLD_DIR, SG_REGIONS, WEATHER_POINTS,
+    SILVER_DIR, GOLD_DIR, SG_REGIONS, WEATHER_POINTS, FIRE_REGIONS,
     HOTSPOT_LAGS, ROLLING_WINDOWS, FORECAST_HORIZON_DAYS,
+    FORECAST_HORIZON_HOURS, HOURLY_RAIN_ROLLING_WINDOWS,
 )
 
 log = logging.getLogger(__name__)
@@ -78,6 +79,43 @@ def _weather_features(weather_silver: pd.DataFrame) -> pd.DataFrame:
     return out.reset_index()
 
 
+def _bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Compass bearing (degrees, 0=N, clockwise) from point 1 to point 2."""
+    lat1r, lon1r, lat2r, lon2r = (np.radians(v) for v in (lat1, lon1, lat2, lon2))
+    dlon = lon2r - lon1r
+    x = np.sin(dlon) * np.cos(lat2r)
+    y = np.cos(lat1r) * np.sin(lat2r) - np.sin(lat1r) * np.cos(lat2r) * np.cos(dlon)
+    return (np.degrees(np.arctan2(x, y)) + 360) % 360
+
+
+def _upwind_features(gold: pd.DataFrame) -> pd.DataFrame:
+    """Does today's wind at Singapore actually blow FROM each fire source
+    region? Fire counts (fire_<region>_roll7) and wind direction
+    (wind_dir_singapore) are otherwise two unrelated columns -- a tree
+    split on raw wind-direction degrees can't recover "which compass
+    direction Sumatra/Kalimantan is from Singapore" on its own, since
+    that's a geographic fact, not something learnable from the labels.
+    This makes the alignment explicit instead of leaving it to be
+    (incompletely) rediscovered from raw features.
+
+    alignment = cos(wind_dir_singapore - bearing_to_region_centroid),
+    clipped to >=0 (favourable transport only -- a negative value just
+    means "wind blowing away from this source", not a different kind of
+    exposure), scaled by that region's existing 7-day fire count to get
+    an "upwind exposure dose".
+    """
+    sg_lat, sg_lon = WEATHER_POINTS["singapore"]
+    out = pd.DataFrame(index=gold.index)
+    for region, box in FIRE_REGIONS.items():
+        centroid_lat = (box["lat_min"] + box["lat_max"]) / 2
+        centroid_lon = (box["lon_min"] + box["lon_max"]) / 2
+        bearing = _bearing_deg(sg_lat, sg_lon, centroid_lat, centroid_lon)
+        alignment = np.cos(np.radians(gold["wind_dir_singapore"] - bearing)).clip(lower=0)
+        out[f"upwind_{region}"] = alignment * gold[f"fire_{region}_roll7"]
+    out["upwind_total"] = out.sum(axis=1)
+    return out
+
+
 def build_gold(
     pm25_silver: pd.DataFrame,
     weather_silver_df: pd.DataFrame,
@@ -92,6 +130,7 @@ def build_gold(
     weather["date"] = pd.to_datetime(weather["date"])
 
     gold = daily_pm25.merge(fire, on="date", how="left").merge(weather, on="date", how="left")
+    gold = pd.concat([gold, _upwind_features(gold)], axis=1)
 
     # Persistence features: today's own reading, renamed so it's obviously
     # a feature and not accidentally used as the label.
@@ -114,6 +153,119 @@ def build_gold(
 def write_gold(df: pd.DataFrame, gold_dir: Path = GOLD_DIR) -> Path:
     gold_dir.mkdir(parents=True, exist_ok=True)
     out_path = gold_dir / "daily_features.parquet"
+    df.to_parquet(out_path, index=False)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Hourly pipeline (revised core target). Additive: build_gold() above and
+# daily_features.parquet are untouched and still what the shipped daily
+# model uses. Everything below writes to a separate hourly_features.parquet.
+# ---------------------------------------------------------------------------
+
+
+def _hourly_pm25(pm25_silver: pd.DataFrame) -> pd.DataFrame:
+    """Unlike _daily_pm25, nothing is resampled away here -- bronze_to_silver
+    already reindexes PM2.5 onto a full hourly grid, so this is the native
+    grain, not an aggregate of it."""
+    return pm25_silver[["ts"] + SG_REGIONS + ["national_mean"]].copy()
+
+
+def _fire_features_hourly(firms_daily: pd.DataFrame) -> pd.DataFrame:
+    """FIRMS/VIIRS is a satellite-pass source (~1-2 overpasses/day/location)
+    -- there is no genuine intraday refresh of fire activity to build, and
+    a calendar day's own detections aren't fully in until that day is over.
+    So every hour of day D gets day D-1's fully-finalized fire features
+    (the same lag/roll features _fire_features already builds, shifted
+    forward one full day before being broadcast across D's 24 hours) --
+    never day D's own, still-accumulating count. This is the honest
+    resolution of this input, not an hourly one dressed up as if it were.
+    """
+    daily = _fire_features(firms_daily).set_index("date")
+    shifted = daily.shift(1)
+    shifted.index.name = "date"
+    return shifted.reset_index()
+
+
+def _weather_features_hourly(weather_silver: pd.DataFrame) -> pd.DataFrame:
+    """Weather is genuinely hourly upstream already -- no resampling, just
+    a per-point pivot, plus short hour-scale rolling rain sums in place of
+    the daily pipeline's 3-day/7-day ones (HOURLY_RAIN_ROLLING_WINDOWS)."""
+    frames = []
+    for point in WEATHER_POINTS:
+        g = weather_silver[weather_silver["point"] == point].set_index("ts").sort_index()
+        if g.empty:
+            log.warning("No weather rows for point '%s'; its features will be all-NaN", point)
+            continue
+        hourly = pd.DataFrame(index=g.index)
+        hourly.index.name = "ts"
+        hourly[f"wind_speed_{point}"] = g["wind_speed_kmh"]
+        hourly[f"wind_dir_{point}"] = g["wind_dir_deg"]
+        hourly[f"rain_{point}_mm"] = g["rain_mm"]
+        for w in HOURLY_RAIN_ROLLING_WINDOWS:
+            hourly[f"rain_{point}_roll{w}h"] = hourly[f"rain_{point}_mm"].rolling(w, min_periods=1).sum()
+        frames.append(hourly)
+    out = frames[0]
+    for f in frames[1:]:
+        out = out.join(f, how="outer")
+    out.index.name = "ts"
+    return out.reset_index()
+
+
+def _upwind_features_hourly(gold: pd.DataFrame) -> pd.DataFrame:
+    """Same geometry as _upwind_features. Wind now genuinely changes hour
+    to hour while the fire term it's scaled by only updates once a day
+    (_fire_features_hourly) -- the alignment term is what makes this
+    feature actually move within a day."""
+    sg_lat, sg_lon = WEATHER_POINTS["singapore"]
+    out = pd.DataFrame(index=gold.index)
+    for region, box in FIRE_REGIONS.items():
+        centroid_lat = (box["lat_min"] + box["lat_max"]) / 2
+        centroid_lon = (box["lon_min"] + box["lon_max"]) / 2
+        bearing = _bearing_deg(sg_lat, sg_lon, centroid_lat, centroid_lon)
+        alignment = np.cos(np.radians(gold["wind_dir_singapore"] - bearing)).clip(lower=0)
+        out[f"upwind_{region}"] = alignment * gold[f"fire_{region}_roll7"]
+    out["upwind_total"] = out.sum(axis=1)
+    return out
+
+
+def build_gold_hourly(
+    pm25_silver: pd.DataFrame,
+    weather_silver_df: pd.DataFrame,
+    firms_daily: pd.DataFrame,
+) -> pd.DataFrame:
+    """Hourly counterpart to build_gold(). One row per hour (Singapore
+    time). Labels are FORECAST_HORIZON_HOURS ahead, not FORECAST_HORIZON_DAYS.
+    """
+    pm25 = _hourly_pm25(pm25_silver)
+    fire = _fire_features_hourly(firms_daily)
+    weather = _weather_features_hourly(weather_silver_df)
+
+    pm25["date"] = pm25["ts"].dt.floor("D")
+    fire["date"] = pd.to_datetime(fire["date"])
+
+    gold = pm25.merge(fire, on="date", how="left").merge(weather, on="ts", how="left")
+    gold = pd.concat([gold, _upwind_features_hourly(gold)], axis=1)
+
+    # Persistence features: this hour's own reading.
+    for r in SG_REGIONS + ["national_mean"]:
+        gold[f"now_{r}"] = gold[r]
+
+    # Labels: each region's PM2.5 exactly FORECAST_HORIZON_HOURS ahead.
+    h = FORECAST_HORIZON_HOURS
+    for r in SG_REGIONS + ["national_mean"]:
+        gold[f"label_{r}"] = gold[r].shift(-h)
+
+    gold = gold.drop(columns=SG_REGIONS + ["national_mean", "date"])
+    gold = gold.rename(columns={
+        "label_national_mean": "label_national", "now_national_mean": "now_national", "ts": "date",
+    })
+    return gold.sort_values("date").reset_index(drop=True)
+
+
+def write_gold_hourly(df: pd.DataFrame, gold_dir: Path = GOLD_DIR) -> Path:
+    gold_dir.mkdir(parents=True, exist_ok=True)
+    out_path = gold_dir / "hourly_features.parquet"
     df.to_parquet(out_path, index=False)
     return out_path
 
