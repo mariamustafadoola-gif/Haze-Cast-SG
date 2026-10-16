@@ -116,8 +116,19 @@ def evaluate_all_horizons(gold: pd.DataFrame, haze_seasons: dict[str, tuple[str,
             complete = gold[feature_cols + [label_col]].notna().all(axis=1)
             for season_name, (start, end) in haze_seasons.items():
                 end_exclusive = pd.Timestamp(end) + pd.Timedelta(days=1)
+                # Train exclusion starts `horizon` hours before the season
+                # boundary: label_h{horizon}_{target} is `now_{target}`
+                # shifted -horizon, so a row up to `horizon` hours before
+                # the season start already carries a label value read from
+                # *inside* the held-out season. Without this buffer those
+                # rows would land in train while leaking test-season ground
+                # truth through their label -- caught in the 2026-10-17
+                # audit (panel review); the daily model's season-fold split
+                # has the same 1-day-shift version of this gap, not yet
+                # patched there.
+                train_excl_start = pd.Timestamp(start) - pd.Timedelta(hours=horizon)
                 test_mask = complete & gold["date"].between(start, end_exclusive, inclusive="left")
-                train_mask = complete & ~gold["date"].between(start, end_exclusive, inclusive="left")
+                train_mask = complete & ~gold["date"].between(train_excl_start, end_exclusive, inclusive="left")
                 train, test = gold.loc[train_mask], gold.loc[test_mask]
                 if test.empty or train.empty:
                     continue
