@@ -43,7 +43,20 @@ from hazecast.train import _metrics  # same elevated-recall/MAE metrics as the d
 log = logging.getLogger(__name__)
 
 TARGETS = ["north", "south", "east", "west", "central", "national"]
-NON_FEATURE_COLS = {"date"} | {f"now_{t}" for t in TARGETS}
+# Only "date" and the pre-existing "label_<t>" columns (the single h=1
+# label build_gold_hourly() already bakes into hourly_features.parquet,
+# literally equal to label_h1_<t>) are excluded. "now_<t>" -- every
+# region's current reading, including the target's own -- IS a feature:
+# it's the strongest single predictor for a near-term forecast, and
+# matches hazecast.train._feature_columns's behavior, which the validated
+# tuning scripts actually used. Two bugs were caught and fixed here during
+# a 2026-10-16/17 local out-of-sample re-run, both before this module was
+# ever used for a reported result: (1) label_<t> wasn't excluded, leaking
+# the answer into every horizon's features (caught via an implausibly
+# perfect central/h=1 score); (2) a since-removed version of this line
+# also excluded every now_<t> column, silently stripping persistence out
+# of every model entirely (caught via a nulled now_<target> coefficient).
+NON_FEATURE_COLS = {"date"} | {f"label_{t}" for t in TARGETS}
 TRAIN_SUBSAMPLE_ROWS = 20_000  # QuantileRegressor's LP solver scales poorly past this
 TRAIN_SEED = 42  # checked against seed=123 for robustness; see project log
 
