@@ -1,7 +1,7 @@
 # data (raw downloads and generated layers are not committed - see data/README.md)
-data/raw/**/*.csv
-data/raw/**/*.zip
-data/raw/**/*.json
+# data/raw/**/*.csv   -- re-enabled 2026-10-22, tracked via Git LFS so the team doesn't each re-download/re-register for FIRMS
+# data/raw/**/*.zip   -- re-enabled 2026-10-22, tracked via Git LFS
+# data/raw/**/*.json  -- re-enabled 2026-10-22, tracked via Git LFS
 data/bronze/**/*.parquet
 data/silver/**/*.parquet
 data/gold/**/*.parquet
