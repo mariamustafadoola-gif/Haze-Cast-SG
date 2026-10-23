@@ -60,7 +60,8 @@ def _get(url: str, params: dict | None = None, headers: dict | None = None, trie
             if r.status_code == 429 and attempt < tries:  # rate limited: wait and retry
                 time.sleep(10 * attempt)
                 continue
-            r.raise_for_status()
+            if r.status_code >= 400:  # show the API's own message, not just the code
+                raise requests.HTTPError(f"{r.status_code} from {url.split('/api/')[0]}: {r.text[:300]}", response=r)
             return r
         except requests.RequestException:
             if attempt == tries:
@@ -172,7 +173,7 @@ def firms_area() -> str:
     east = max(b["lon_max"] for b in FIRE_REGIONS.values())
     south = min(b["lat_min"] for b in FIRE_REGIONS.values())
     north = max(b["lat_max"] for b in FIRE_REGIONS.values())
-    return f"{west},{south},{east},{north}"
+    return f"{west:g},{south:g},{east:g},{north:g}"  # "95,-6.2,119.5,6", the format FIRMS accepts
 
 
 def normalise_firms(csv_text: str) -> pd.DataFrame:
@@ -189,7 +190,7 @@ def fetch_firms(start: date, end: date) -> pd.DataFrame:
         raise RuntimeError("No FIRMS_MAP_KEY. Get a free key from NASA FIRMS and put FIRMS_MAP_KEY=... in .env")
     frames, d = [], start
     while d <= end:
-        days = min(10, (end - d).days + 1)  # the API allows 1 to 10 days per call
+        days = min(5, (end - d).days + 1)  # 5 days per call: confirmed to work for VIIRS_SNPP_NRT
         url = FIRMS_URL.format(key=key, source=FIRMS_SOURCE, area=firms_area(), days=days, day=d.isoformat())
         text = _get(url).text
         if text.lower().startswith(("invalid", "error")):
