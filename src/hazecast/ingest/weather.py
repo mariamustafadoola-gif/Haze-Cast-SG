@@ -15,10 +15,10 @@ hazecast.config.WEATHER_POINTS (within 0.5 degrees) -- this is a
 convenience matcher for this proof of concept's specific downloads, not a
 general geocoder.
 
-Live path (production DAG): same endpoint, called daily for the last few
-days per point, to pick up any late revisions. Not exercised in this
-sandbox (outbound network to Open-Meteo was blocked in the environment
-this was built in) -- confirm it works before wiring into Airflow.
+Live path: hazecast.ingest.live downloads the most recent hours for every
+point from the Open-Meteo forecast API (past_days) into data/raw/weather/,
+in this same file format. Hours that appear in more than one file are
+de-duplicated below, keeping the older file's value.
 """
 from __future__ import annotations
 import glob
@@ -82,6 +82,13 @@ def load_weather_bronze(raw_dir: Path = RAW_DIR / "weather") -> pd.DataFrame:
         frames.append(df)
 
     out = pd.concat(frames, ignore_index=True)
+    # Files for the same place can overlap (historical export + update files +
+    # live downloads). Files are read in name order, so the older file's value
+    # is kept for any hour that appears twice.
+    before = len(out)
+    out = out.drop_duplicates(["point", "ts"], keep="first")
+    if before != len(out):
+        log.info("weather: dropped %d hours that appeared in more than one file", before - len(out))
     missing = set(WEATHER_POINTS) - set(out["point"].unique())
     if missing:
         log.warning("No weather file found for expected point(s): %s", missing)

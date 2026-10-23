@@ -13,3 +13,5 @@ python-dotenv>=1.0
 # dev / test only -- not needed by the running pipeline or API
 pytest>=8.0
 jupyterlab>=4.2
+matplotlib>=3.8   # data team notebook charts
+ipywidgets>=8.1   # data team notebook feature lookup box

@@ -282,3 +282,11 @@ if __name__ == "__main__":
         "gold: %d rows, %d columns, %s to %s -> %s",
         len(gold), gold.shape[1], gold.date.min(), gold.date.max(), path,
     )
+
+    # Also build the hourly table (the team's main forecast target).
+    gold_h = build_gold_hourly(pm25, weather, firms)
+    path_h = write_gold_hourly(gold_h)
+    log.info(
+        "gold (hourly): %d rows, %d columns, %s to %s -> %s",
+        len(gold_h), gold_h.shape[1], gold_h.date.min(), gold_h.date.max(), path_h,
+    )

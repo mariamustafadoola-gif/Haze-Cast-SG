@@ -33,3 +33,9 @@ airflow.cfg
 .DS_Store
 .vscode/
 *.swp
+
+# secrets: API keys live in .env, never committed
+.env
+
+# live downloads (re-fetched with python -m hazecast.refresh)
+data/raw/**/*live*.csv

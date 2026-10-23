@@ -5,11 +5,10 @@ Manual path (used for this proof of concept):
   https://data.gov.sg/datasets/d_6c0d5fc34838b12472475fdb73c0af29/view
   and place the CSV under data/raw/pm25/.
 
-Live path (for the production DAG, not exercised in this sandbox because
-outbound network to data.gov.sg was blocked in the environment this was
-built in -- confirm it works before wiring into Airflow):
-  GET https://api-open.data.gov.sg/v2/real-time/api/pm25
-  Updated every 15 minutes per the dataset page. Poll daily and append.
+Live path: hazecast.ingest.live calls
+  GET https://api-open.data.gov.sg/v2/real-time/api/pm25?date=YYYY-MM-DD
+for each recent day and saves the readings under data/raw/pm25/ in this
+same file format, so this loader reads them unchanged.
 
 Known data quirks handled here (found by inspecting the actual file):
   - One row in the source file had a malformed timestamp

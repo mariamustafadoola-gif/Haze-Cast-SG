@@ -8,13 +8,10 @@ Indonesia, format = CSV) and place the downloaded .zip (or its extracted
 months, an "nrt" (near-real-time) file with a slightly different, smaller
 column set.
 
-Live path (production DAG): the FIRMS area API
-(/api/area/csv/<MAP_KEY>/<SOURCE>/<AREA>/<DAY_RANGE>), max 5 days per
-call, rate-limited to 5000 transactions / 10 minutes. Requires a free
-MAP_KEY (register at the URL above). Not exercised in this sandbox
-(outbound network to firms.modaps.eosdis.nasa.gov was blocked in the
-environment this was built in) -- confirm it works before wiring into
-Airflow.
+Live path: hazecast.ingest.live calls the FIRMS area API
+(/api/area/csv/<MAP_KEY>/VIIRS_SNPP_NRT/<AREA>/<DAY_RANGE>/<DATE>, up to
+10 days per call) and saves the result as data/raw/firms/fire_nrt_zlive.csv.
+Requires a free MAP_KEY, read from FIRMS_MAP_KEY in .env.
 
 We keep only detections inside the two source-region bounding boxes
 defined in hazecast.config.FIRE_REGIONS (Sumatra, Kalimantan); everything

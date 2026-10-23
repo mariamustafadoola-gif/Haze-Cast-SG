@@ -11,8 +11,7 @@
 # First run: `docker compose run --rm airflow-webserver airflow db init`
 # then create a user, or set AIRFLOW__CORE__SIMPLE_AUTH_MANAGER... see
 # README.md "Running it" for exact commands, since these vary by Airflow
-# version and were not re-verified against a live pull in this sandbox
-# (see README's "What's untested" section).
+# version.
 
 x-airflow-common: &airflow-common
   image: apache/airflow:2.9.3-python3.11
@@ -21,6 +20,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     PYTHONPATH: /opt/airflow/src
+    FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
+    DATA_GOV_SG_API_KEY: ${DATA_GOV_SG_API_KEY:-}
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-pandas xgboost mlflow scikit-learn pyarrow}
   volumes:
     - ./dags:/opt/airflow/dags

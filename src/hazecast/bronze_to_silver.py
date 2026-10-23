@@ -8,9 +8,33 @@ from pathlib import Path
 
 import pandas as pd
 
-from hazecast.config import BRONZE_DIR, SILVER_DIR, SG_REGIONS
+from hazecast.config import BRONZE_DIR, SILVER_DIR, SG_REGIONS, MAX_FILL_HOURS
 
 log = logging.getLogger(__name__)
+
+
+def fill_short_gaps(df: pd.DataFrame, cols: list[str], max_hours: int = MAX_FILL_HOURS,
+                    carry_forward: tuple[str, ...] = ()) -> tuple[pd.DataFrame, pd.Series]:
+    """Fill runs of up to `max_hours` missing hours; leave longer runs empty.
+
+    df must have an hourly DatetimeIndex with no missing timestamps (i.e.
+    already reindexed). Returns the filled frame and a boolean Series that
+    is True for every hour where at least one column was filled.
+    """
+    df = df.copy()
+    missing = df[cols].isna().any(axis=1)
+    run_id = (~missing).cumsum()
+    run_len = missing.groupby(run_id).transform("sum")
+    # a run touching the start or end of the series has no reading on one side
+    inside = missing & (run_id > 0) & (run_id < run_id.max())
+    fillable = missing & (run_len <= max_hours) & inside
+    for c in cols:
+        if c in carry_forward:
+            filled_values = df[c].ffill()
+        else:
+            filled_values = df[c].interpolate(method="time", limit_area="inside")
+        df.loc[fillable, c] = filled_values[fillable]
+    return df, fillable
 
 
 def pm25_silver(bronze_path: Path = BRONZE_DIR / "pm25.parquet") -> pd.DataFrame:
@@ -20,6 +44,10 @@ def pm25_silver(bronze_path: Path = BRONZE_DIR / "pm25.parquet") -> pd.DataFrame
     if len(gap_hours):
         log.warning("PM2.5: %d missing hours (e.g. %s)", len(gap_hours), list(gap_hours[:5]))
     df = df.reindex(full)
+    df, filled = fill_short_gaps(df, SG_REGIONS)
+    if filled.any():
+        log.info("PM2.5: filled %d short gap hour(s) (<= %d h) by interpolation", int(filled.sum()), MAX_FILL_HOURS)
+    df["filled"] = filled
     df["national_mean"] = df[SG_REGIONS].mean(axis=1)
     df.index.name = "ts"
     return df.reset_index()
@@ -35,6 +63,11 @@ def weather_silver(bronze_path: Path = BRONZE_DIR / "weather.parquet") -> pd.Dat
         if len(gap_hours):
             log.warning("weather[%s]: %d missing hours", point, len(gap_hours))
         g = g.reindex(full)
+        g, filled = fill_short_gaps(g, ["wind_speed_kmh", "wind_dir_deg", "rain_mm"],
+                                    carry_forward=("wind_dir_deg",))
+        if filled.any():
+            log.info("weather[%s]: filled %d short gap hour(s)", point, int(filled.sum()))
+        g["filled"] = filled
         g["point"] = point
         g.index.name = "ts"
         out.append(g.reset_index())

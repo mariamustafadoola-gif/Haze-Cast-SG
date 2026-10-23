@@ -51,6 +51,7 @@ from sklearn.metrics import mean_absolute_error
 from xgboost import XGBRegressor
 
 from hazecast.config import (
+    USE_SELECTED_FEATURES, SELECTED_FEATURES_DAILY,
     GOLD_DIR, MODELS_DIR, REPO_ROOT, SG_REGIONS,
     HAZE_SEASONS, PM25_ELEVATED_THRESHOLD, XGB_PARAMS, XGB_QUANTILE_ALPHA,
 )
@@ -62,7 +63,11 @@ NON_FEATURE_COLS = {"date"} | {f"label_{t}" for t in TARGETS} | {"label_low_cove
 
 
 def _feature_columns(gold: pd.DataFrame) -> list[str]:
-    return [c for c in gold.columns if c not in NON_FEATURE_COLS]
+    cols = [c for c in gold.columns if c not in NON_FEATURE_COLS]
+    if USE_SELECTED_FEATURES:
+        # keep only the data team's selected set (see config.SELECTED_FEATURES_DAILY)
+        cols = [c for c in cols if c in SELECTED_FEATURES_DAILY]
+    return cols
 
 
 def _usable_seasons(gold: pd.DataFrame, feature_cols: list[str]) -> dict[str, tuple[str, str]]:

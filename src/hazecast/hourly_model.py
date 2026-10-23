@@ -37,6 +37,7 @@ from sklearn.linear_model import QuantileRegressor
 
 from hazecast.config import (
     GOLD_DIR, MODELS_DIR, HOURLY_HORIZONS, HOURLY_TUNED_SETTINGS, PM25_ELEVATED_THRESHOLD,
+    USE_SELECTED_FEATURES, SELECTED_FEATURES_HOURLY,
 )
 from hazecast.train import _metrics  # same elevated-recall/MAE metrics as the daily model
 
@@ -63,6 +64,9 @@ TRAIN_SEED = 42  # checked against seed=123 for robustness; see project log
 
 def _feature_columns(gold: pd.DataFrame) -> list[str]:
     cols = [c for c in gold.columns if c not in NON_FEATURE_COLS and not c.startswith("label_h")]
+    if USE_SELECTED_FEATURES:
+        # keep only the data team's selected set (see config.SELECTED_FEATURES_HOURLY)
+        cols = [c for c in cols if c in SELECTED_FEATURES_HOURLY]
     return cols
 
 
