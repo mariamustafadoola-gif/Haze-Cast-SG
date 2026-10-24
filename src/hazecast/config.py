@@ -92,12 +92,12 @@ FORECAST_HORIZON_HOURS = 1
 HOURLY_RAIN_ROLLING_WINDOWS = [3, 24]
 
 # ---------------------------------------------------------------------------
-# Hourly multi-horizon deliverable (1/3/6/12h ahead, refreshed hourly).
-# h=1 is the primary, most rigorously tuned model; h=3/6/12 reuse that same
-# per-region quantile linear regression approach, built by shifting the
-# h=1 label further ahead (no new features, no future weather needed).
+# Hourly multi-horizon deliverable (6/12/24h ahead, refreshed hourly).
+# Active hourly models are now selected by forward validation. Historical
+# quantile linear regression tuning below is retained for reference only;
+# it is not used by the six-candidate hourly comparison.
 # ---------------------------------------------------------------------------
-HOURLY_HORIZONS = [1, 3, 6, 12]
+HOURLY_HORIZONS = [6, 12, 24]
 
 # Per (region, horizon) QuantileRegressor settings, tuned against the dual
 # bar: recall_elevated >= 1.15x persistence AND mae_elevated <= 1.15x
@@ -170,3 +170,33 @@ XGB_PARAMS = dict(
 # conservative/precise alert, higher to catch more true events at the cost
 # of more false alarms; 0.70-0.95 were swept, 0.85 was the best balance.
 XGB_QUANTILE_ALPHA = 0.85
+
+# Daily model comparison. Existing hourly constants above are preserved.
+# All six candidates are enabled. Set this flag False for the five-model
+# comparison without quantile XGBoost. Restart notebook kernels after edits.
+ENABLE_XGB_QUANTILE = True
+MODEL_CANDIDATES = (
+    "persistence", "ridge", "random_forest", "xgboost", "lightgbm",
+) + (("xgboost_q85",) if ENABLE_XGB_QUANTILE else ())
+# Scaling is fitted inside each training fold, never on validation/test rows.
+RIDGE_ALPHA = 10.0
+LIGHTGBM_PARAMS = dict(
+    objective="regression_l1", n_estimators=300, learning_rate=0.05,
+    num_leaves=15, max_depth=-1, min_child_samples=20,
+    subsample=0.8, subsample_freq=1, colsample_bytree=0.8,
+    reg_lambda=1.0, random_state=42, n_jobs=-1, verbosity=-1,
+)
+RANDOM_FOREST_PARAMS = dict(
+    n_estimators=300, max_depth=12, min_samples_leaf=3,
+    max_features=0.8, random_state=42, n_jobs=-1,
+)
+CV_SPLITS = 3
+FINAL_TEST_FRACTION = 0.20
+MIN_TRAIN_ROWS = 100
+# Rank pooled validation F2 descending, then MAE/RMSE ascending. If no
+# elevated validation observations exist, rank by MAE then RMSE instead.
+MLFLOW_EXPERIMENT = "hazecast-sg-forward"
+
+# Active hourly comparison: independent selected model per region/horizon.
+HOURLY_MLFLOW_EXPERIMENT = "hazecast-sg-hourly-forward"
+HOURLY_TIMEZONE = "Asia/Singapore"

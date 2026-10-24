@@ -9,6 +9,7 @@ uvicorn[standard]>=0.29
 pyarrow>=15.0
 requests>=2.31
 python-dotenv>=1.0
+matplotlib>=3.7
 
 # dev / test only -- not needed by the running pipeline or API
 pytest>=8.0

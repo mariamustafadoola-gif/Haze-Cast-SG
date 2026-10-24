@@ -1,197 +1,251 @@
-"""Hourly multi-horizon PM2.5 forecaster: 1/3/6/12h ahead, refreshed hourly.
+"""Six-candidate hourly forecasts at +6/+12/+24 hours for six targets.
 
-This is the consolidated, "shippable" version of what was explored across
-a long run of ad hoc scripts (kept under experiments/ for the record -- see
-experiments/README.md). Nothing here is a new model; it packages the SAME
-per-region quantile linear regression approach already validated there, so
-the tuned settings live in one place (hazecast.config.HOURLY_TUNED_SETTINGS)
-instead of being copy-pasted across a dozen one-off scripts.
-
-Design, in brief (see the project log for the full reasoning trail):
-  - One QuantileRegressor per (region, horizon), reusing the SAME feature
-    set as the 1h model -- h=3/6/12 labels are built by shifting the
-    target region's own reading further into the future; no new features
-    and no future weather are needed.
-  - Deliberately upward-biased (high quantile, e.g. 0.85-0.91) rather than
-    MAE-minimizing: this project's own metric is recall_elevated (catch
-    real haze) and mae_elevated (how close the number is) together, with
-    persistence (this hour's reading carried forward) as the baseline to
-    beat. Over-reporting when PM2.5 is already trending high was judged
-    the safer failure mode for a public-health tool than an unbiased
-    number that risks under-warning -- see the deployment-decision note
-    in the project log.
-  - Calibration caveat (also in the project log): during actually-elevated
-    hours specifically, empirical coverage runs well below the nominal
-    quantile everywhere, and in two cells (north/2015, central/2015) it's
-    at or below a coin flip. The upward bias is real on average but
-    weaker, and in a couple of cases absent, exactly when it matters most
-    -- worth restating in the write-up, not just in this docstring.
+Uses exact future timestamp labels, purged expanding validation, a final
+holdout and a separate hourly manifest. Source hourly feature engineering
+is unchanged. Timestamps without an offset are interpreted as Singapore time.
 """
 from __future__ import annotations
+import json
 import logging
+import os
+os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
 from pathlib import Path
-
 import joblib
+import mlflow
+import numpy as np
 import pandas as pd
-from sklearn.linear_model import QuantileRegressor
-
 from hazecast.config import (
-    GOLD_DIR, MODELS_DIR, HOURLY_HORIZONS, HOURLY_TUNED_SETTINGS, PM25_ELEVATED_THRESHOLD,
+    GOLD_DIR, MODELS_DIR, SG_REGIONS, HOURLY_HORIZONS, HOURLY_TIMEZONE,
+    PM25_ELEVATED_THRESHOLD, MODEL_CANDIDATES, CV_SPLITS,
+    FINAL_TEST_FRACTION, MIN_TRAIN_ROWS, HOURLY_MLFLOW_EXPERIMENT, REPO_ROOT,
 )
-from hazecast.train import _metrics  # same elevated-recall/MAE metrics as the daily model
+from hazecast.train import _make_model, _metrics, _json_safe, _log_selected_model
 
 log = logging.getLogger(__name__)
-
-TARGETS = ["north", "south", "east", "west", "central", "national"]
-# Only "date" and the pre-existing "label_<t>" columns (the single h=1
-# label build_gold_hourly() already bakes into hourly_features.parquet,
-# literally equal to label_h1_<t>) are excluded. "now_<t>" -- every
-# region's current reading, including the target's own -- IS a feature:
-# it's the strongest single predictor for a near-term forecast, and
-# matches hazecast.train._feature_columns's behavior, which the validated
-# tuning scripts actually used. Two bugs were caught and fixed here during
-# a 2026-10-16/17 local out-of-sample re-run, both before this module was
-# ever used for a reported result: (1) label_<t> wasn't excluded, leaking
-# the answer into every horizon's features (caught via an implausibly
-# perfect central/h=1 score); (2) a since-removed version of this line
-# also excluded every now_<t> column, silently stripping persistence out
-# of every model entirely (caught via a nulled now_<target> coefficient).
-NON_FEATURE_COLS = {"date"} | {f"label_{t}" for t in TARGETS}
-TRAIN_SUBSAMPLE_ROWS = 20_000  # QuantileRegressor's LP solver scales poorly past this
-TRAIN_SEED = 42  # checked against seed=123 for robustness; see project log
+TARGETS = SG_REGIONS + ["national"]
 
 
-def _feature_columns(gold: pd.DataFrame) -> list[str]:
-    cols = [c for c in gold.columns if c not in NON_FEATURE_COLS and not c.startswith("label_h")]
+def _prepare(gold):
+    gold = gold.copy()
+    dates = pd.to_datetime(gold["date"], errors="raise")
+    dates = (dates.dt.tz_localize(HOURLY_TIMEZONE) if dates.dt.tz is None
+             else dates.dt.tz_convert(HOURLY_TIMEZONE))
+    gold["date"] = dates
+    if dates.isna().any() or dates.duplicated().any() or gold.empty:
+        raise ValueError("Hourly gold requires unique, non-null timestamps")
+    if not dates.eq(dates.dt.floor("h")).all():
+        raise ValueError("Hourly gold timestamps must fall on hour boundaries")
+    gold = gold.sort_values("date").reset_index(drop=True)
+    if len(gold) > 1 and not gold.date.diff().eq(pd.Timedelta(hours=1)).any():
+        raise ValueError("Expected hourly data, not daily gold")
+    missing = {f"now_{t}" for t in TARGETS} - set(gold.columns)
+    if missing:
+        raise ValueError(f"Missing hourly PM2.5 columns: {sorted(missing)}")
+    return gold
+
+
+def _feature_columns(gold):
+    cols = [c for c in gold if c not in {"date", "label_low_coverage"}
+            and not c.startswith(("label_", "target_"))]
+    if not cols or any(not pd.api.types.is_numeric_dtype(gold[c]) for c in cols):
+        raise ValueError("Hourly features must be nonempty and numeric")
     return cols
 
 
-def get_tuned_setting(target: str, horizon: int) -> tuple[float, float]:
-    """(quantile, alpha) for this region/horizon, falling back to the
-    region's h=1 (primary) setting when this horizon has no override --
-    see the "known open gaps" note on HOURLY_TUNED_SETTINGS for which
-    fallbacks are a confirmed-fine reuse (h=6/h=12 everywhere, central/west
-    at h=3) versus an accepted shortfall (west at h=3; national at h=1/h=3
-    use their own best-found entry, not a silent pass).
-    """
-    if (target, horizon) in HOURLY_TUNED_SETTINGS:
-        return HOURLY_TUNED_SETTINGS[(target, horizon)]
-    return HOURLY_TUNED_SETTINGS[(target, 1)]
+def build_label(gold, target, horizon):
+    """Match t+h exactly; gaps produce missing labels, never shifted hours."""
+    if not isinstance(horizon, (int, np.integer)) or horizon <= 0:
+        raise ValueError("Horizon must be a positive integer number of hours")
+    dates = pd.to_datetime(gold["date"], errors="raise")
+    if dates.isna().any() or dates.duplicated().any():
+        raise ValueError("Labels require unique, non-null timestamps")
+    readings = pd.Series(gold[f"now_{target}"].to_numpy(), index=pd.DatetimeIndex(dates))
+    future = pd.DatetimeIndex(dates) + pd.Timedelta(hours=int(horizon))
+    return pd.Series(readings.reindex(future).to_numpy(), index=gold.index)
 
 
-def build_label(gold: pd.DataFrame, target: str, horizon: int) -> pd.Series:
-    """label_h{horizon}_{target} = that region's own reading, shifted
-    `horizon` hours earlier in the row so each row's features (as of "now")
-    line up with the reading `horizon` hours ahead.
-    """
-    return gold[f"now_{target}"].shift(-horizon)
-
-
-def fit_predict(
-    train: pd.DataFrame, test: pd.DataFrame, feature_cols: list[str],
-    label_col: str, target: str, horizon: int,
-) -> "tuple[QuantileRegressor, pd.Series]":
-    quantile, alpha = get_tuned_setting(target, horizon)
-    train_sub = train.sample(n=min(TRAIN_SUBSAMPLE_ROWS, len(train)), random_state=TRAIN_SEED)
-    model = QuantileRegressor(quantile=quantile, alpha=alpha, solver="highs").fit(
-        train_sub[feature_cols], train_sub[label_col]
-    )
-    pred = model.predict(test[feature_cols])
-    return model, pred
-
-
-def evaluate_all_horizons(gold: pd.DataFrame, haze_seasons: dict[str, tuple[str, str]]) -> pd.DataFrame:
-    """LOSO evaluation across every (target, horizon, season), persistence
-    included, for a before-you-ship sanity check. Mirrors the ad hoc sweep
-    scripts this consolidates; see experiments/ for the original runs this
-    was validated against.
-    """
-    feature_cols = _feature_columns(gold)
-    rows = []
+def _labelled(gold, horizon):
+    gold = _prepare(gold)
     for target in TARGETS:
-        now_col = f"now_{target}"
-        for horizon in HOURLY_HORIZONS:
-            label_col = f"label_h{horizon}_{target}"
-            gold[label_col] = build_label(gold, target, horizon)
-            complete = gold[feature_cols + [label_col]].notna().all(axis=1)
-            for season_name, (start, end) in haze_seasons.items():
-                end_exclusive = pd.Timestamp(end) + pd.Timedelta(days=1)
-                # Train exclusion starts `horizon` hours before the season
-                # boundary: label_h{horizon}_{target} is `now_{target}`
-                # shifted -horizon, so a row up to `horizon` hours before
-                # the season start already carries a label value read from
-                # *inside* the held-out season. Without this buffer those
-                # rows would land in train while leaking test-season ground
-                # truth through their label -- caught in the 2026-10-17
-                # audit (panel review); the daily model's season-fold split
-                # has the same 1-day-shift version of this gap, not yet
-                # patched there.
-                train_excl_start = pd.Timestamp(start) - pd.Timedelta(hours=horizon)
-                test_mask = complete & gold["date"].between(start, end_exclusive, inclusive="left")
-                train_mask = complete & ~gold["date"].between(train_excl_start, end_exclusive, inclusive="left")
-                train, test = gold.loc[train_mask], gold.loc[test_mask]
-                if test.empty or train.empty:
-                    continue
-
-                persistence_pred = test[now_col].to_numpy()
-                m = _metrics(test[label_col], persistence_pred, PM25_ELEVATED_THRESHOLD)
-                m.update(model="persistence", target=target, horizon=horizon, season=season_name)
-                rows.append(m)
-
-                _, pred = fit_predict(train, test, feature_cols, label_col, target, horizon)
-                m = _metrics(test[label_col], pred, PM25_ELEVATED_THRESHOLD)
-                q, a = get_tuned_setting(target, horizon)
-                m.update(model="linreg_q", variant=f"q{q}_a{a}", target=target, horizon=horizon, season=season_name)
-                rows.append(m)
-        log.info("evaluated: target=%s", target)
-    return pd.DataFrame(rows)
+        # Always rebuild: ignore stale or pre-shifted labels in source gold.
+        gold[f"label_{target}"] = build_label(gold, target, horizon)
+    return gold
 
 
-def train_final_hourly_models(gold: pd.DataFrame) -> dict[tuple[str, int], Path]:
-    """Fit one QuantileRegressor per (region, horizon) on ALL available
-    labelled rows and persist to data/models/hourly/ -- this is what the
-    live hourly scoring loop should load (not yet built; see project log
-    "pending tasks"). Mirrors train.train_final_models()'s structure for
-    the daily model.
+def _complete(gold, cols, target, horizon):
+    mask = np.isfinite(gold[cols + [f"label_{target}"]].to_numpy(dtype=float)).all(axis=1)
+    if "label_low_coverage" in gold:
+        mask &= gold["label_low_coverage"].eq(False).to_numpy()
+    mask &= (gold.date + pd.Timedelta(hours=horizon) <= gold.date.max()).to_numpy()
+    return gold.loc[mask]
+
+
+def _before(rows, boundary, horizon):
+    return rows.loc[rows.date + pd.Timedelta(hours=horizon) < boundary]
+
+
+def _fit(name, rows, cols, target):
+    model = _make_model(name)
+    if model is not None:
+        model.fit(rows[cols], rows[f"label_{target}"])
+    return model
+
+
+def _predict(model, rows, cols, target):
+    pred = (rows[f"now_{target}"].to_numpy(dtype=float) if model is None
+            else model.predict(rows[cols]))
+    return np.maximum(0.0, np.asarray(pred, dtype=float))
+
+
+def _setup_mlflow():
+    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", f"sqlite:///{REPO_ROOT / 'mlflow.db'}"))
+    mlflow.set_experiment(HOURLY_MLFLOW_EXPERIMENT)
+
+
+def _horizons(horizons):
+    values = list(HOURLY_HORIZONS if horizons is None else horizons)
+    if not values or len(values) != len(set(values)):
+        raise ValueError("Horizons must be nonempty and unique")
+    if any(not isinstance(h, (int, np.integer)) or h <= 0 for h in values):
+        raise ValueError("Horizons must be positive integer hours")
+    return [int(h) for h in values]
+
+
+def _evaluate(gold, horizon):
+    gold = _labelled(gold, horizon)
+    cols = _feature_columns(gold)
+    if not 0 < FINAL_TEST_FRACTION < 1 or CV_SPLITS < 1:
+        raise ValueError("Invalid evaluation split configuration")
+    dates = gold.date
+    test_start = dates.iloc[int(len(dates) * (1 - FINAL_TEST_FRACTION))]
+    development = _before(gold, test_start, horizon)
+    # First block initializes training; remaining blocks are forward validation.
+    blocks = np.array_split(development.date.to_numpy(), CV_SPLITS + 1)
+    if any(len(b) == 0 for b in blocks):
+        raise ValueError("Insufficient dates for forward validation")
+    results, selections = [], {}
+    _setup_mlflow()
+    for target in TARGETS:
+        if f"now_{target}" not in cols:
+            raise ValueError(f"Missing persistence feature now_{target}")
+        rows = _complete(gold, cols, target, horizon)
+        pooled = {name: ([], []) for name in MODEL_CANDIDATES}
+        for fold, block in enumerate(blocks[1:], 1):
+            start, end = pd.Timestamp(block[0]), pd.Timestamp(block[-1])
+            train = _before(rows, start, horizon)
+            valid = rows.loc[rows.date.between(start, end)]
+            if len(train) < MIN_TRAIN_ROWS or valid.empty:
+                raise ValueError(f"{target}: insufficient rows in validation fold {fold}")
+            for name in MODEL_CANDIDATES:
+                with mlflow.start_run(run_name=f"{target}_h{horizon}_{name}_cv{fold}"):
+                    model = _fit(name, train, cols, target)
+                    pred = _predict(model, valid, cols, target)
+                    metrics = _metrics(valid[f"label_{target}"], pred)
+                    params = dict(target=target, model=name, split="validation", fold=fold,
+                                  train_end=str(train.date.max()), valid_start=str(start),
+                                  n_train=len(train), horizon_hours=horizon,
+                                  threshold=PM25_ELEVATED_THRESHOLD)
+                    mlflow.log_params(params)
+                    if model is not None:
+                        mlflow.log_dict(
+                            json.loads(json.dumps(model.get_params(), default=str)),
+                            "model_parameters.json",
+                        )
+                    mlflow.log_metrics({k: v for k, v in metrics.items() if np.isfinite(v)})
+                    results.append({**params, **metrics})
+                pooled[name][0].extend(valid[f"label_{target}"].tolist())
+                pooled[name][1].extend(pred.tolist())
+        summaries = {n: _metrics(*pair) for n, pair in pooled.items()}
+        has_haze = next(iter(summaries.values()))["n_elevated"] > 0
+        winner = min(MODEL_CANDIDATES, key=lambda n: (
+            (-summaries[n]["f2"], summaries[n]["mae"], summaries[n]["rmse"])
+            if has_haze else (summaries[n]["mae"], summaries[n]["rmse"])))
+        for name, metrics in summaries.items():
+            results.append(dict(target=target, model=name, split="validation_pooled", **metrics))
+        # The latest contiguous block is touched only after selection is fixed.
+        train = _before(rows, test_start, horizon)
+        test = rows.loc[rows.date >= test_start]
+        if len(train) < MIN_TRAIN_ROWS or test.empty:
+            raise ValueError(f"{target}: insufficient training/final holdout rows")
+        selected = _fit(winner, train, cols, target)
+        holdout = _metrics(test[f"label_{target}"], _predict(selected, test, cols, target))
+        results.append(dict(target=target, model=winner, split="final_test", **holdout))
+        selections[target] = dict(model=winner, validation=summaries[winner], final_test=holdout,
+                                  selection_rule="f2_then_mae_rmse" if has_haze else "mae_then_rmse_no_positive_support",
+                                  test_start=test_start.isoformat())
+    summary = pd.DataFrame(results)
+    summary["horizon_hours"] = horizon
+    return summary, selections, cols
+
+
+def evaluate_all_horizons(gold, haze_seasons=None, *, horizons=None):
+    """Compare six candidates per target/horizon using forward splits.
+
+    haze_seasons is accepted for old callers but no longer controls splitting.
+    No future seasons are included in any earlier training fold.
     """
-    feature_cols = _feature_columns(gold)
+    if haze_seasons is not None:
+        log.warning("haze_seasons is ignored; hourly evaluation uses forward-only splits")
+    return pd.concat([_evaluate(gold, h)[0] for h in _horizons(horizons)], ignore_index=True)
+
+
+def train_final_hourly_models(gold, *, horizons=None):
+    """Compare/select, refit 18 winners, publish hourly manifest last.
+
+    Returns 18 (target,horizon) entries. Persistence entries are None because
+    persistence needs no fitted artifact. Single training publisher required.
+    """
+    gold = _prepare(gold)
+    horizons = _horizons(horizons)
+    evaluations = []
+    decisions = {}
+    # Evaluate all horizons before publishing any new manifest.
+    for horizon in horizons:
+        summary, selections, cols = _evaluate(gold, horizon)
+        evaluations.append(summary)
+        decisions[horizon] = selections
     out_dir = MODELS_DIR / "hourly"
     out_dir.mkdir(parents=True, exist_ok=True)
-
+    summary = pd.concat(evaluations, ignore_index=True)
+    summary.to_csv(out_dir / "eval_summary.csv", index=False)
+    manifest = dict(schema_version=1, pipeline="hourly", horizons_hours=horizons,
+                    timezone=HOURLY_TIMEZONE, feature_columns=cols,
+                    threshold=PM25_ELEVATED_THRESHOLD, models={})
     paths = {}
-    for target in TARGETS:
-        for horizon in HOURLY_HORIZONS:
-            label_col = f"label_h{horizon}_{target}"
-            if label_col not in gold.columns:
-                gold[label_col] = build_label(gold, target, horizon)
-            complete = gold[feature_cols + [label_col]].notna().all(axis=1)
-            train = gold.loc[complete]
-            if len(train) < 100:
-                log.warning("target=%s horizon=%d: only %d fully-featured rows, skipping", target, horizon, len(train))
-                continue
-            quantile, alpha = get_tuned_setting(target, horizon)
-            train_sub = train.sample(n=min(TRAIN_SUBSAMPLE_ROWS, len(train)), random_state=TRAIN_SEED)
-            model = QuantileRegressor(quantile=quantile, alpha=alpha, solver="highs").fit(
-                train_sub[feature_cols], train_sub[label_col]
-            )
-            out_path = out_dir / f"linreg_q_{target}_h{horizon}.joblib"
-            joblib.dump({"model": model, "feature_cols": feature_cols, "quantile": quantile, "alpha": alpha}, out_path)
-            paths[(target, horizon)] = out_path
+    for horizon in horizons:
+        labelled = _labelled(gold, horizon)
+        manifest["models"][str(horizon)] = {}
+        for target, selection in decisions[horizon].items():
+            rows = _complete(labelled, cols, target, horizon)
+            model = _fit(selection["model"], rows, cols, target)
+            with mlflow.start_run(run_name=f"final_{target}_h{horizon}_{selection['model']}") as run:
+                mlflow.log_params(dict(target=target, model=selection["model"],
+                    horizon_hours=horizon, n_train=len(rows), n_features=len(cols),
+                    threshold=PM25_ELEVATED_THRESHOLD))
+                for split in ("validation", "final_test"):
+                    mlflow.log_metrics({f"{split}_{k}": v for k, v in selection[split].items()
+                                        if np.isfinite(v)})
+                entry = dict(**selection, artifact=None, run_id=run.info.run_id,
+                    training_end=rows.date.max().isoformat(),
+                    training_label_end=(rows.date.max() + pd.Timedelta(hours=horizon)).isoformat())
+                path = None
+                if model is not None:
+                    path = out_dir / f"{target}_h{horizon}_{run.info.run_id}.joblib"
+                    joblib.dump(model, path)
+                    entry["artifact"] = path.name
+                    _log_selected_model(model, selection["model"])
+                    mlflow.log_artifact(str(path))
+                paths[(target, horizon)] = path
+                mlflow.log_dict(_json_safe(entry), "selection.json")
+                manifest["models"][str(horizon)][target] = entry
+    temp = out_dir / "model_manifest.tmp"
+    temp.write_text(json.dumps(_json_safe(manifest), indent=2, allow_nan=False))
+    temp.replace(out_dir / "model_manifest.json")
+    log.info("Published %d hourly selections for horizons %s", len(paths), horizons)
     return paths
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    from hazecast.config import HAZE_SEASONS
-
-    gold_df = pd.read_parquet(GOLD_DIR / "hourly_features.parquet")
-    gold_df["date"] = pd.to_datetime(gold_df["date"])
-    gold_df = gold_df.sort_values("date").reset_index(drop=True)
-
-    eval_df = evaluate_all_horizons(gold_df, HAZE_SEASONS)
-    summary_path = MODELS_DIR / "hourly_eval_summary.csv"
-    eval_df.to_csv(summary_path, index=False)
-    log.info("Wrote hourly multi-horizon evaluation summary (%d rows) to %s", len(eval_df), summary_path)
-
-    model_paths = train_final_hourly_models(gold_df)
-    log.info("Trained and saved %d final hourly models to data/models/hourly/", len(model_paths))
+    gold = pd.read_parquet(GOLD_DIR / "hourly_features.parquet")
+    train_final_hourly_models(gold)
