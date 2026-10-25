@@ -16,6 +16,11 @@ BRONZE_DIR = DATA_DIR / "bronze"
 SILVER_DIR = DATA_DIR / "silver"
 GOLD_DIR = DATA_DIR / "gold"
 MODELS_DIR = DATA_DIR / "models"
+MONITORING_DIR = DATA_DIR / "monitoring"
+
+# First day of training history (matches the manual downloads in
+# data/README.md). hazecast.ingest.historical backfills from here.
+HISTORY_START = "2014-04-01"
 
 # ---------------------------------------------------------------------------
 # Regions: Singapore's 5 NEA reporting regions (must match the PM2.5 file's
@@ -100,12 +105,12 @@ FORECAST_HORIZON_HOURS = 1
 HOURLY_RAIN_ROLLING_WINDOWS = [3, 24]
 
 # ---------------------------------------------------------------------------
-# Hourly multi-horizon deliverable (1/3/6/12h ahead, refreshed hourly).
-# h=1 is the primary, most rigorously tuned model; h=3/6/12 reuse that same
-# per-region quantile linear regression approach, built by shifting the
-# h=1 label further ahead (no new features, no future weather needed).
+# Hourly multi-horizon deliverable (6/12/24h ahead, refreshed hourly).
+# Active hourly models are now selected by forward validation. Historical
+# quantile linear regression tuning below is retained for reference only;
+# it is not used by the six-candidate hourly comparison.
 # ---------------------------------------------------------------------------
-HOURLY_HORIZONS = [1, 3, 6, 12]
+HOURLY_HORIZONS = [6, 12, 24]
 
 # Per (region, horizon) QuantileRegressor settings, tuned against the dual
 # bar: recall_elevated >= 1.15x persistence AND mae_elevated <= 1.15x
@@ -278,3 +283,75 @@ SELECTED_FEATURES_DAILY = [
     "today_central",
     "today_national",
 ]
+
+
+# Daily model comparison. Existing hourly constants above are preserved.
+# All six candidates are enabled. Set this flag False for the five-model
+# comparison without quantile XGBoost. Restart notebook kernels after edits.
+ENABLE_XGB_QUANTILE = True
+MODEL_CANDIDATES = (
+    "persistence", "ridge", "random_forest", "xgboost", "lightgbm",
+) + (("xgboost_q85",) if ENABLE_XGB_QUANTILE else ())
+# Scaling is fitted inside each training fold, never on validation/test rows.
+RIDGE_ALPHA = 10.0
+LIGHTGBM_PARAMS = dict(
+    objective="regression_l1", n_estimators=300, learning_rate=0.05,
+    num_leaves=15, max_depth=-1, min_child_samples=20,
+    subsample=0.8, subsample_freq=1, colsample_bytree=0.8,
+    reg_lambda=1.0, random_state=42, n_jobs=-1, verbosity=-1,
+)
+RANDOM_FOREST_PARAMS = dict(
+    n_estimators=300, max_depth=12, min_samples_leaf=3,
+    max_features=0.8, random_state=42, n_jobs=-1,
+)
+CV_SPLITS = 3
+FINAL_TEST_FRACTION = 0.20
+MIN_TRAIN_ROWS = 100
+# Rank pooled validation F2 descending, then MAE/RMSE ascending. If no
+# elevated validation observations exist, rank by MAE then RMSE instead.
+MLFLOW_EXPERIMENT = "hazecast-sg-forward"
+
+# Active hourly comparison: independent selected model per region/horizon.
+HOURLY_MLFLOW_EXPERIMENT = "hazecast-sg-hourly-forward"
+HOURLY_TIMEZONE = "Asia/Singapore"
+
+
+# ---------------------------------------------------------------------------
+# Model monitoring + governance (hazecast.model_monitor, dags/, and the SOP in
+# docs/MODEL_GOVERNANCE.md). Starting values, not tuned facts: review them
+# after the first haze season of live monitoring.
+# ---------------------------------------------------------------------------
+MONITOR_WINDOW_DAYS = 7            # performance window: forecasts vs actuals (model quality, bias)
+DRIFT_WINDOW_DAYS = 30             # drift window: a week of slow, autocorrelated features is too few samples
+DRIFT_NULL_WINDOWS = 120           # training-period windows used to calibrate the PSI limits
+ATTRIBUTION_NULL_WINDOWS = 30      # ... and the NDCG limits (attribution is costlier to compute)
+# Data quality: the gold features the deployed model reads vs its training data.
+# Per-feature PSI limits are calibrated (model_monitor.drift_null): alert above the 99th
+# percentile of PSI over normal training-period windows, warn above the 95th. The standard
+# bands below are only floors, never the limit by themselves.
+PSI_WARN, PSI_ALERT = 0.10, 0.25
+PSI_ALERT_MIN_FEATURES = 3         # drift counts toward retraining only if this many features are in alert
+MISSING_RATE_MAX_INCREASE = 0.05   # absolute increase in a feature's missing rate vs training
+OUT_OF_RANGE_MAX_FRACTION = 0.05   # share of window values outside the training min/max
+FEATURE_MAX_AGE_HOURS = 3          # newest complete gold row older than this = stale pipeline
+# Model quality: archived forecasts vs NEA actuals (forecast ledger).
+MODEL_MAE_RATIO_ALERT = 1.5        # rolling MAE / holdout MAE of the deployed model
+RECALL_VS_PERSISTENCE_MARGIN = 0.25  # alert if the model catches 25 pp fewer haze hours than persistence
+MIN_ELEVATED_FOR_RECALL = 12       # haze hours needed (per region, per window) before recall is judged
+MIN_MATCHED_FOR_QUALITY = 48       # matched forecast hours needed before quality alerts count
+MODEL_QUALITY_ALERT_MIN_GROUPS = 3 # of the 18 target x horizon groups
+# Bias drift: are some regions / times of day served systematically worse?
+BIAS_RECALL_GAP_ALERT = 0.30       # max - min elevated-hour recall across the 5 regions (each >= 12 haze hours)
+BIAS_RECALL_GAP_DRIFT = 0.20       # ... or this much wider than at training time
+BIAS_MEAN_ERROR_DRIFT = 8.0        # ug/m3 shift in a region's mean signed error vs training
+# Feature attribution drift: has what the model relies on changed?
+ATTRIBUTION_TOP_K = 10
+ATTRIBUTION_NDCG_ALERT = 0.90      # SageMaker Clarify's default; a ceiling -- per-model limits are the 1st
+                                   # (alert) / 5th (warn) percentile of NDCG over training-period windows
+ATTRIBUTION_SAMPLE_ROWS = 3000
+# Governance
+MAX_MODEL_AGE_DAYS = 35            # scheduled refresh even without drift (monthly retrain + slack)
+PROMOTION_MAX_MAE_DEGRADATION = 0.10  # challenger holdout MAE may be at most 10% worse than champion's
+PROMOTION_F2_TOLERANCE = 0.10         # challenger holdout F2 may trail persistence's by at most this ...
+PROMOTION_MIN_SKILL_TARGETS = 0.5     # ... in at least this share of groups with haze hours in the holdout
+                                      # (2024-26 holdout: 14 of 18 groups within 0.10; only 6 of 18 ahead)

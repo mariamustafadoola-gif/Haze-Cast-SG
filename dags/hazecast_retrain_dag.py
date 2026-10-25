@@ -1,39 +1,87 @@
-"""Airflow DAG: monthly (or drift-triggered) retraining.
+"""hazecast_retrain: champion/challenger retraining (monthly, or triggered).
 
-Runs the full leave-one-season-out evaluation plus the final per-region
-fit, and logs everything to MLflow. Per the proposal, this is also meant
-to be triggered early if the monitoring job (not yet implemented in this
-proof of concept -- see README's "what's stubbed" section) detects PSI-
-drift above the agreed threshold; that trigger is a TODO, wired here only
-as a second, less frequent schedule for now.
+Triggered by: the 1st of each month (scheduled refresh), hazecast_monitoring
+when the governance rule says "retrain", hazecast_backfill, or a person.
+
+build_layers -> train_challenger -> train_daily -> replay_holdout -> promote? -> write_baseline -> dashboards
+
+train_challenger  six-candidate forward-validated comparison per region x horizon,
+                  published to data/models/hourly_staging/<run_id>/ (not production)
+replay_holdout    honest holdout forecasts + monitor replay for the challenger
+promote           governance gate (hazecast.governance): integrity, skill vs
+                  persistence, no regression vs the champion. If it fails the run
+                  stops here (skipped) and the champion keeps serving.
+write_baseline    monitoring baseline for the newly promoted champion
+
+The two trainings run one after the other on purpose: each uses every core
+(XGBoost/LightGBM OpenMP threads, scikit-learn joblib workers), and running
+them side by side oversubscribed the CPUs so badly that the hourly comparison
+slowed down ~20x in testing. replay_holdout runs even if train_daily fails
+(trigger_rule="all_done"), so the secondary daily model never blocks the
+hourly promotion.
 """
 from __future__ import annotations
-from datetime import datetime, timedelta
+
+from datetime import timedelta
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
+from airflow.operators.python import PythonOperator, ShortCircuitOperator
+
+from _common import DEFAULT_ARGS, START, TAGS
 
 
-def _evaluate_and_train():
-    import pandas as pd
-    from hazecast.config import GOLD_DIR
-    from hazecast.train import evaluate_all, train_final_models
-
-    gold = pd.read_parquet(GOLD_DIR / "daily_features.parquet")
-    gold["date"] = pd.to_datetime(gold["date"])
-    evaluate_all(gold)       # logs LOSO metrics to MLflow, for the team to review
-    train_final_models(gold)  # fits + registers the model the scoring task loads
+def _build():
+    from hazecast.orchestration import build_layers
+    return build_layers()
 
 
-default_args = {"owner": "hazecast-sg", "retries": 1, "retry_delay": timedelta(minutes=30)}
+def _train(run_id):
+    from hazecast.orchestration import train_challenger
+    return train_challenger(run_id)
+
+
+def _replay(ti):
+    from hazecast.orchestration import replay_holdout
+    return replay_holdout(ti.xcom_pull(task_ids="train_challenger"))
+
+
+def _promote(ti):
+    from hazecast.orchestration import promote
+    return promote(ti.xcom_pull(task_ids="train_challenger"))
+
+
+def _baseline():
+    from hazecast.orchestration import write_baseline
+    return write_baseline()
+
+
+def _dashboards():
+    from hazecast.orchestration import dashboards
+    return dashboards()
+
+
+def _daily():
+    from hazecast.orchestration import train_daily
+    return train_daily()
+
 
 with DAG(
     dag_id="hazecast_retrain",
-    description="Monthly retrain + leave-one-season-out evaluation, logged to MLflow",
-    default_args=default_args,
-    schedule="0 3 1 * *",  # 1st of the month, 03:00 SGT
-    start_date=datetime(2026, 1, 1),
+    description="Train challenger, gate it against the champion, promote, refresh monitoring baseline",
+    default_args={**DEFAULT_ARGS, "retries": 1, "retry_delay": timedelta(minutes=15)},
+    schedule="0 3 1 * *",  # 03:00 SGT on the 1st of each month
+    start_date=START,
     catchup=False,
-    tags=["hazecast-sg"],
+    max_active_runs=1,  # single training publisher
+    tags=TAGS,
 ) as dag:
-    PythonOperator(task_id="evaluate_and_train", python_callable=_evaluate_and_train)
+    build = PythonOperator(task_id="build_layers", python_callable=_build)
+    train = PythonOperator(task_id="train_challenger", python_callable=_train, execution_timeout=timedelta(hours=6))
+    replay = PythonOperator(task_id="replay_holdout", python_callable=_replay, execution_timeout=timedelta(hours=2),
+                            trigger_rule="all_done")
+    gate = ShortCircuitOperator(task_id="promote", python_callable=_promote)
+    baseline = PythonOperator(task_id="write_baseline", python_callable=_baseline)
+    dash = PythonOperator(task_id="dashboards", python_callable=_dashboards)
+    daily = PythonOperator(task_id="train_daily", python_callable=_daily, execution_timeout=timedelta(hours=3))
+
+    build >> train >> daily >> replay >> gate >> baseline >> dash

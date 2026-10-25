@@ -73,9 +73,12 @@ def load_firms_bronze(raw_dir: Path = RAW_DIR / "firms") -> pd.DataFrame:
 
     frames = []
     for f in archive_files:
-        df = pd.read_csv(f, usecols=_COLS + ["type"], dtype={"acq_time": str})
-        df = df[df["type"] == 0].drop(columns="type")  # vegetation fires only
-        frames.append(df)
+        df = pd.read_csv(f, dtype={"acq_time": str})
+        if "type" in df.columns:
+            df = df[df["type"] == 0]  # vegetation fires only
+        # Archive files from the FIRMS API (hazecast.ingest.historical) have no
+        # `type` column, so like NRT they are kept as-is.
+        frames.append(df[_COLS])
     for f in nrt_files:
         df = pd.read_csv(f, usecols=_COLS, dtype={"acq_time": str})
         frames.append(df)  # no `type` column in NRT; kept as-is, see docstring

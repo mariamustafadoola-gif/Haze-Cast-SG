@@ -1,95 +1,142 @@
-# HazeCast SG -- local proof-of-concept stack.
-#   docker compose up --build
+# HazeCast SG -- end-to-end stack: Airflow (orchestration) + MLflow (tracking)
+# + FastAPI (forecast + monitoring API) + JupyterLab (exploration).
 #
-# Brings up: MLflow tracking server, Airflow (webserver+scheduler, dev-mode
-# SequentialExecutor), and the FastAPI scoring endpoint. Airflow uses the
-# official image with _PIP_ADDITIONAL_REQUIREMENTS for our extra deps --
-# fine for a class project / local dev, but Astronomer's own docs say not
-# to do this in production (rebuild-on-every-start cost); a custom image
-# per docker/pipeline.Dockerfile's pattern would replace it there.
+#   cp .env.example .env        # add FIRMS_MAP_KEY (free) -- optional but fire features go stale without it
+#   docker compose up -d --build
 #
-# First run: `docker compose run --rm airflow-webserver airflow db init`
-# then create a user, or set AIRFLOW__CORE__SIMPLE_AUTH_MANAGER... see
-# README.md "Running it" for exact commands, since these vary by Airflow
-# version.
+#   Airflow   http://localhost:8080   (admin / admin -- local dev only)
+#   MLflow    http://localhost:5000
+#   API       http://localhost:8000/docs   (/forecast/hourly, /monitoring/dashboard)
+#   Jupyter   http://localhost:8888/lab
+#
+# First run: in Airflow, trigger `hazecast_backfill` once (downloads whatever
+# history data/raw/ is missing, rebuilds the layers and triggers training).
+# The hourly / monitoring / retrain DAGs then run on their schedules.
+# See README.md "End-to-end pipeline".
 
 x-airflow-common: &airflow-common
-  image: apache/airflow:2.9.3-python3.11
+  build:
+    context: .
+    dockerfile: docker/airflow.Dockerfile
+  image: hazecast-airflow:latest
   environment:
-    AIRFLOW__CORE__EXECUTOR: SequentialExecutor
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/airflow.db
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DEFAULT_TIMEZONE: Asia/Singapore
+    AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: Asia/Singapore
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
     PYTHONPATH: /opt/airflow/src
+    GIT_PYTHON_REFRESH: quiet
+    OMP_WAIT_POLICY: PASSIVE   # idle OpenMP threads sleep instead of spinning (XGBoost/LightGBM)
+    MLFLOW_TRACKING_URI: http://mlflow:5000
     FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
     DATA_GOV_SG_API_KEY: ${DATA_GOV_SG_API_KEY:-}
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-pandas xgboost mlflow scikit-learn pyarrow}
   volumes:
     - ./dags:/opt/airflow/dags
     - ./src:/opt/airflow/src
     - ./data:/opt/airflow/data
-    - airflow_db:/opt/airflow
+    - ./reports:/opt/airflow/reports
+    - ./tests:/opt/airflow/tests
+    - airflow_logs:/opt/airflow/logs
+  depends_on: &airflow-depends
+    postgres:
+      condition: service_healthy
 
 services:
-  mlflow:
-    image: ghcr.io/mlflow/mlflow:v2.14.1
-    command: >
-      mlflow server --host 0.0.0.0 --port 5000
-      --backend-store-uri sqlite:////mlflow/mlflow.db
-      --default-artifact-root /mlflow/artifacts
-    ports:
-      - "5000:5000"
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
     volumes:
-      - mlflow_data:/mlflow
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        airflow db migrate &&
+        airflow users create --username admin --password admin --firstname Haze --lastname Cast \
+          --role Admin --email admin@example.com || true
+    restart: "no"
 
   airflow-webserver:
     <<: *airflow-common
     command: webserver
     ports:
-      - "8080:8080"
+      - "${AIRFLOW_PORT:-8080}:8080"
     depends_on:
-      - mlflow
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
   airflow-scheduler:
     <<: *airflow-common
     command: scheduler
     depends_on:
-      - mlflow
+      <<: *airflow-depends
+      airflow-init:
+        condition: service_completed_successfully
+      mlflow:
+        condition: service_started
+    restart: unless-stopped
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.17.2
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts --serve-artifacts
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    volumes:
+      - mlflow_data:/mlflow
+    restart: unless-stopped
 
   api:
     build:
       context: .
       dockerfile: docker/pipeline.Dockerfile
+    image: hazecast-pipeline:latest
     command: uvicorn serving.app:app --host 0.0.0.0 --port 8000
     ports:
-      - "8000:8000"
+      - "${API_PORT:-8000}:8000"
     volumes:
       - ./data:/app/data
-    depends_on:
-      - mlflow
+      - ./reports:/app/reports
+    restart: unless-stopped
 
-  # Same pattern as the Assignment 1 environment: JupyterLab in-browser,
-  # no auth token (convenience for local dev only -- do not expose this
-  # port beyond localhost). Runs the pipeline.Dockerfile image so every
-  # hazecast.* module is importable straight from a notebook cell; the
-  # repo root is mounted read/write so edits and notebook runs persist.
-  # --allow-root: pipeline.Dockerfile never creates a non-root user (its
-  # only job is running batch jobs / the API, where this doesn't matter),
-  # so the container's default user is root -- JupyterLab refuses to start
-  # as root without this flag (confirmed: it built fine but exited 1 on
-  # first real run without it).
+  # JupyterLab in-browser, no auth token (local dev only -- do not expose this
+  # port beyond localhost). --allow-root: the image runs as root.
   jupyter:
+    image: hazecast-pipeline:latest
     build:
       context: .
       dockerfile: docker/pipeline.Dockerfile
     command: >
       jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
-      --NotebookApp.token='' --NotebookApp.password=''
-      --notebook-dir=/app
+      --ServerApp.token='' --ServerApp.password='' --notebook-dir=/app
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      FIRMS_MAP_KEY: ${FIRMS_MAP_KEY:-}
+      DATA_GOV_SG_API_KEY: ${DATA_GOV_SG_API_KEY:-}
     ports:
-      - "8888:8888"
+      - "${JUPYTER_PORT:-8888}:8888"
     volumes:
       - .:/app
+    profiles: ["dev"]
 
 volumes:
-  airflow_db:
+  postgres_data:
   mlflow_data:
+  airflow_logs:

@@ -1,32 +1,8 @@
-"""Train and evaluate next-day PM2.5 forecasters, one per Singapore region.
+"""Daily six-model comparison with purged forward validation and final holdout.
 
-Evaluation is leave-one-haze-season-out (see hazecast.config.HAZE_SEASONS),
-not a single chronological split. This project's own data profiling found
-that "elevated" days (>=56 ug/m3) are about 2% of all days, concentrated in
-a handful of seasons (2015, 2019, and the still-unlabelled 2026 episode).
-A calendar-year train/validate/test split can land a whole fold with zero
-elevated days in it, at which point "recall on elevated days" is undefined
-for that fold. Leave-one-season-out guarantees every test fold actually
-contains haze to evaluate against.
-
-Four candidates are compared per region, per season:
-  - persistence: tomorrow = today (the baseline every model must beat)
-  - linreg: plain linear regression on the same feature set
-  - xgboost: gradient-boosted trees minimizing MAE (the model in the
-    proposal) -- kept as a comparison baseline; see xgboost_q85 below for
-    why this is NOT what's shipped as the production model
-  - xgboost_q85: gradient-boosted trees targeting the 85th percentile
-    (hazecast.config.XGB_QUANTILE_ALPHA) instead of the mean -- THIS is
-    the production model (see train_final_models). Plain MAE regression
-    under-predicts rare elevated days (~2% of all days); a high-quantile
-    objective deliberately biases toward catching them, trading some
-    precision (more false alarms) for much better recall on the days
-    this tool actually exists to flag. See README "Results" for the
-    real evaluated numbers behind this choice.
-
-Results are written to data/models/eval_summary.csv and logged to MLflow.
-A final XGBoost model per region, trained on all available labelled rows,
-is saved to data/models/ and registered in MLflow for the scoring step.
+Run as ``python -m hazecast.train``. Hourly models/settings remain separate.
+Gold features must already be causal: no future/backfilled observations or
+unshifted labels may be included in feature engineering.
 """
 from __future__ import annotations
 import json
@@ -34,216 +10,273 @@ import logging
 import os
 from pathlib import Path
 
-# MLflow tries to stamp each run with the current git commit/branch/remote
-# via GitPython. pipeline.Dockerfile doesn't install the `git` binary (the
-# api/train/score containers don't need a working repo), so without this,
-# every mlflow.start_run() call prints ~10 lines of "git executable not
-# found" warnings -- harmless, but noisy enough to look like a crash (see
-# README). Must be set before mlflow is imported.
 os.environ.setdefault("GIT_PYTHON_REFRESH", "quiet")
-
+import joblib
 import mlflow
-import mlflow.xgboost
+import mlflow.sklearn
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_absolute_error
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 from xgboost import XGBRegressor
-
 from hazecast.config import (
     USE_SELECTED_FEATURES, SELECTED_FEATURES_DAILY,
-    GOLD_DIR, MODELS_DIR, REPO_ROOT, SG_REGIONS,
-    HAZE_SEASONS, PM25_ELEVATED_THRESHOLD, XGB_PARAMS, XGB_QUANTILE_ALPHA,
+    GOLD_DIR, MODELS_DIR, REPO_ROOT, SG_REGIONS, FORECAST_HORIZON_DAYS,
+    PM25_ELEVATED_THRESHOLD, XGB_PARAMS, XGB_QUANTILE_ALPHA,
+    MODEL_CANDIDATES, RANDOM_FOREST_PARAMS, RIDGE_ALPHA, LIGHTGBM_PARAMS, CV_SPLITS,
+    FINAL_TEST_FRACTION, MIN_TRAIN_ROWS, MLFLOW_EXPERIMENT,
 )
 
 log = logging.getLogger(__name__)
-
 TARGETS = SG_REGIONS + ["national"]
-NON_FEATURE_COLS = {"date"} | {f"label_{t}" for t in TARGETS} | {"label_low_coverage"}
+NON_FEATURE_COLS = {"date", "label_low_coverage"} | {f"label_{t}" for t in TARGETS}
 
 
-def _feature_columns(gold: pd.DataFrame) -> list[str]:
-    cols = [c for c in gold.columns if c not in NON_FEATURE_COLS]
+def _prepare(gold):
+    gold = gold.copy()
+    gold["date"] = pd.to_datetime(gold["date"], errors="raise")
+    if gold["date"].isna().any() or gold["date"].duplicated().any():
+        raise ValueError("Daily gold must have one non-null date per row")
+    gold = gold.sort_values("date").reset_index(drop=True)
+    if gold.empty:
+        raise ValueError("Empty daily gold table")
+    return gold
+
+
+def _feature_columns(gold):
+    # Exclude every label, including future horizons unknown to this module.
+    cols = [c for c in gold if c not in NON_FEATURE_COLS
+            and not c.startswith(("label_", "target_"))]
     if USE_SELECTED_FEATURES:
         # keep only the data team's selected set (see config.SELECTED_FEATURES_DAILY)
         cols = [c for c in cols if c in SELECTED_FEATURES_DAILY]
+    if not cols or any(not pd.api.types.is_numeric_dtype(gold[c]) for c in cols):
+        raise ValueError("Gold features must be nonempty and numeric")
     return cols
 
 
-def _usable_seasons(gold: pd.DataFrame, feature_cols: list[str]) -> dict[str, tuple[str, str]]:
-    """Only evaluate a season if its rows have complete feature coverage.
-    Currently excludes 2015 until the 2014-2018 FIRMS backfill lands, since
-    fire features are all-NaN before 2019-01-01 in this project's data.
-    """
-    usable = {}
-    for name, (start, end) in HAZE_SEASONS.items():
-        mask = gold["date"].between(start, end)
-        if not mask.any():
-            log.warning("Season '%s' (%s to %s): no rows in gold table, skipping", name, start, end)
-            continue
-        coverage = gold.loc[mask, feature_cols].notna().all(axis=1).mean()
-        if coverage < 0.95:
-            log.warning(
-                "Season '%s': only %.0f%% of rows have complete features "
-                "(likely missing FIRMS backfill) -- skipping this fold",
-                name, coverage * 100,
-            )
-            continue
-        usable[name] = (start, end)
-    return usable
+def _complete(gold, cols, target):
+    mask = np.isfinite(gold[cols + [f"label_{target}"]].to_numpy(dtype=float)).all(axis=1)
+    if "label_low_coverage" in gold:
+        mask &= gold["label_low_coverage"].eq(False).to_numpy()
+    # Labels whose observation time is beyond the table's cutoff are unknown.
+    mask &= (gold.date + pd.Timedelta(days=FORECAST_HORIZON_DAYS) <= gold.date.max()).to_numpy()
+    return gold.loc[mask]
 
 
-def _metrics(y_true: pd.Series, y_pred: np.ndarray, threshold: float) -> dict:
-    mae = mean_absolute_error(y_true, y_pred)
-    elevated = y_true >= threshold
-    n_elevated = int(elevated.sum())
-    if n_elevated:
-        mae_elevated = mean_absolute_error(y_true[elevated], y_pred[elevated])
-        recall_elevated = float(((y_pred >= threshold) & elevated).sum() / n_elevated)
+def _metrics(y_true, y_pred, threshold=PM25_ELEVATED_THRESHOLD):
+    y, p = np.asarray(y_true, dtype=float), np.asarray(y_pred, dtype=float)
+    if not len(y) or y.shape != p.shape or not np.isfinite(p).all():
+        raise ValueError("Metrics require finite, aligned nonempty predictions")
+    actual, flagged = y >= threshold, p >= threshold
+    tp = int((actual & flagged).sum())
+    fp = int((~actual & flagged).sum())
+    fn = int((actual & ~flagged).sum())
+    # F2 = 5 TP / (5 TP + 4 FN + FP). No positive support is
+    # explicitly undefined, so a quiet fold cannot win selection on F2.
+    f2 = 5 * tp / (5 * tp + 4 * fn + fp) if actual.any() else float("nan")
+    return dict(mae=float(mean_absolute_error(y, p)),
+                rmse=float(np.sqrt(mean_squared_error(y, p))), f2=f2,
+                tp=tp, fp=fp, fn=fn, n_test=len(y), n_elevated=int(actual.sum()))
+
+
+def _make_model(name):
+    if name == "ridge":
+        return make_pipeline(StandardScaler(), Ridge(alpha=RIDGE_ALPHA))
+    if name == "lightgbm":
+        try:
+            from lightgbm import LGBMRegressor
+        except ImportError as exc:
+            raise ImportError(
+                "LightGBM is required for this comparison. Install lightgbm "
+                "in the same Python environment as the notebook kernel."
+            ) from exc
+        return LGBMRegressor(**LIGHTGBM_PARAMS)
+    if name == "random_forest":
+        return RandomForestRegressor(**RANDOM_FOREST_PARAMS)
+    if name == "xgboost":
+        return XGBRegressor(**{**XGB_PARAMS, "objective": "reg:absoluteerror"})
+    if name == "xgboost_q85":
+        return XGBRegressor(**{**XGB_PARAMS, "objective": "reg:quantileerror",
+                              "quantile_alpha": XGB_QUANTILE_ALPHA})
+    if name == "persistence":
+        return None
+    raise ValueError(f"Unknown model: {name}")
+
+
+def _predict(model, rows, cols, target):
+    pred = (rows[f"today_{target}"].to_numpy(dtype=float) if model is None
+            else model.predict(rows[cols]))
+    return np.maximum(0.0, np.asarray(pred, dtype=float))
+
+
+def _fit(name, rows, cols, target):
+    model = _make_model(name)
+    if model is not None:
+        model.fit(rows[cols], rows[f"label_{target}"])
+    return model
+
+
+def _before(rows, boundary):
+    # Strict embargo: training label timestamps precede the next origin.
+    return rows.loc[rows.date + pd.Timedelta(days=FORECAST_HORIZON_DAYS) < boundary]
+
+
+def _setup_mlflow():
+    mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", f"sqlite:///{REPO_ROOT / 'mlflow.db'}"))
+    mlflow.set_experiment(MLFLOW_EXPERIMENT)
+
+
+def _evaluate(gold):
+    gold = _prepare(gold)
+    cols = _feature_columns(gold)
+    if not 0 < FINAL_TEST_FRACTION < 1 or CV_SPLITS < 1:
+        raise ValueError("Invalid evaluation split configuration")
+    dates = gold.date
+    test_start = dates.iloc[int(len(dates) * (1 - FINAL_TEST_FRACTION))]
+    development = _before(gold, test_start)
+    # First block initializes training; remaining blocks are forward validation.
+    blocks = np.array_split(development.date.to_numpy(), CV_SPLITS + 1)
+    if any(len(b) == 0 for b in blocks):
+        raise ValueError("Insufficient dates for forward validation")
+    results, selections = [], {}
+    _setup_mlflow()
+    for target in TARGETS:
+        if f"today_{target}" not in cols:
+            raise ValueError(f"Missing persistence feature today_{target}")
+        rows = _complete(gold, cols, target)
+        pooled = {name: ([], []) for name in MODEL_CANDIDATES}
+        for fold, block in enumerate(blocks[1:], 1):
+            start, end = pd.Timestamp(block[0]), pd.Timestamp(block[-1])
+            train = _before(rows, start)
+            valid = rows.loc[rows.date.between(start, end)]
+            if len(train) < MIN_TRAIN_ROWS or valid.empty:
+                raise ValueError(f"{target}: insufficient rows in validation fold {fold}")
+            for name in MODEL_CANDIDATES:
+                with mlflow.start_run(run_name=f"{target}_{name}_cv{fold}"):
+                    model = _fit(name, train, cols, target)
+                    pred = _predict(model, valid, cols, target)
+                    metrics = _metrics(valid[f"label_{target}"], pred)
+                    params = dict(target=target, model=name, split="validation", fold=fold,
+                                  train_end=str(train.date.max()), valid_start=str(start),
+                                  n_train=len(train), horizon_days=FORECAST_HORIZON_DAYS,
+                                  threshold=PM25_ELEVATED_THRESHOLD)
+                    mlflow.log_params(params)
+                    if model is not None:
+                        mlflow.log_dict(
+                            json.loads(json.dumps(model.get_params(), default=str)),
+                            "model_parameters.json",
+                        )
+                    mlflow.log_metrics({k: v for k, v in metrics.items() if np.isfinite(v)})
+                    results.append({**params, **metrics})
+                pooled[name][0].extend(valid[f"label_{target}"].tolist())
+                pooled[name][1].extend(pred.tolist())
+        summaries = {n: _metrics(*pair) for n, pair in pooled.items()}
+        has_haze = next(iter(summaries.values()))["n_elevated"] > 0
+        winner = min(MODEL_CANDIDATES, key=lambda n: (
+            (-summaries[n]["f2"], summaries[n]["mae"], summaries[n]["rmse"])
+            if has_haze else (summaries[n]["mae"], summaries[n]["rmse"])))
+        for name, metrics in summaries.items():
+            results.append(dict(target=target, model=name, split="validation_pooled", **metrics))
+        # The latest contiguous block is touched only after selection is fixed.
+        train = _before(rows, test_start)
+        test = rows.loc[rows.date >= test_start]
+        if len(train) < MIN_TRAIN_ROWS or test.empty:
+            raise ValueError(f"{target}: insufficient training/final holdout rows")
+        selected = _fit(winner, train, cols, target)
+        holdout = _metrics(test[f"label_{target}"], _predict(selected, test, cols, target))
+        results.append(dict(target=target, model=winner, split="final_test", **holdout))
+        selections[target] = dict(model=winner, validation=summaries[winner], final_test=holdout,
+                                  selection_rule="f2_then_mae_rmse" if has_haze else "mae_then_rmse_no_positive_support",
+                                  test_start=test_start.isoformat())
+    return pd.DataFrame(results), selections, cols
+
+
+def evaluate_all(gold):
+    """Return validation and selected-model holdout results without publishing models."""
+    return _evaluate(gold)[0]
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+
+def _log_selected_model(model, candidate):
+    """Use native boosting formats and support MLflow 2.x/3.x naming."""
+    import inspect
+    if candidate in ("xgboost", "xgboost_q85"):
+        import mlflow.xgboost
+        logger = mlflow.xgboost.log_model
+        saved_model = model
+        options = {"model_format": "json"}
+    elif candidate == "lightgbm":
+        import mlflow.lightgbm
+        logger = mlflow.lightgbm.log_model
+        # A native Booster avoids sklearn/skops serialization of its wrapper.
+        saved_model = model.booster_
+        options = {}
+    elif candidate in ("ridge", "random_forest"):
+        import mlflow.sklearn
+        logger = mlflow.sklearn.log_model
+        saved_model = model
+        # These estimators were fitted by this process. Load only trusted outputs.
+        options = {"serialization_format": "cloudpickle"}
     else:
-        mae_elevated, recall_elevated = np.nan, np.nan
-    flagged = int((y_pred >= threshold).sum())
-    precision_elevated = (
-        float(((y_pred >= threshold) & elevated).sum() / flagged) if flagged else np.nan
-    )
-    return {
-        "mae": mae,
-        "mae_elevated": mae_elevated,
-        "recall_elevated": recall_elevated,
-        "precision_elevated": precision_elevated,
-        "n_test": len(y_true),
-        "n_elevated": n_elevated,
-    }
+        raise ValueError(f"No fitted-model logger for {candidate}")
+    location_key = "name" if "name" in inspect.signature(logger).parameters else "artifact_path"
+    return logger(saved_model, **{location_key: "model"}, **options)
 
 
-def run_season_fold(
-    gold: pd.DataFrame, target: str, feature_cols: list[str],
-    season_name: str, start: str, end: str,
-) -> list[dict]:
-    label_col = f"label_{target}"
-    complete = gold[feature_cols + [label_col]].notna().all(axis=1)
-    test_mask = complete & gold["date"].between(start, end)
-    train_mask = complete & ~gold["date"].between(start, end)
+def train_final_models(gold):
+    """Evaluate/select, refit using known labels, and publish manifest last.
 
-    train, test = gold.loc[train_mask], gold.loc[test_mask]
-    if len(test) == 0 or len(train) == 0:
-        log.warning("target=%s season=%s: empty train or test fold, skipping", target, season_name)
-        return []
-
-    X_train, y_train = train[feature_cols], train[label_col]
-    X_test, y_test = test[feature_cols], test[label_col]
-    today_col = f"today_{target}"
-
-    results = []
-
-    persistence_pred = test[today_col].to_numpy()
-    results.append({"model": "persistence", **_metrics(y_test, persistence_pred, PM25_ELEVATED_THRESHOLD)})
-
-    lr = LinearRegression().fit(X_train, y_train)
-    results.append({"model": "linreg", **_metrics(y_test, lr.predict(X_test), PM25_ELEVATED_THRESHOLD)})
-
-    xgb = XGBRegressor(**XGB_PARAMS).fit(X_train, y_train)
-    results.append({"model": "xgboost", **_metrics(y_test, xgb.predict(X_test), PM25_ELEVATED_THRESHOLD)})
-
-    xgb_q = XGBRegressor(
-        **XGB_PARAMS, objective="reg:quantileerror", quantile_alpha=XGB_QUANTILE_ALPHA,
-    ).fit(X_train, y_train)
-    results.append({"model": "xgboost_q85", **_metrics(y_test, xgb_q.predict(X_test), PM25_ELEVATED_THRESHOLD)})
-
-    for r in results:
-        r.update(target=target, season=season_name, n_train=len(train))
-    return results
-
-
-def evaluate_all(gold: pd.DataFrame) -> pd.DataFrame:
-    feature_cols = _feature_columns(gold)
-    seasons = _usable_seasons(gold, feature_cols)
-    if not seasons:
-        raise RuntimeError(
-            "No haze season has complete feature coverage -- run the "
-            "2014-2018 FIRMS backfill, or add a covered season to "
-            "hazecast.config.HAZE_SEASONS, before evaluating."
-        )
-    log.info("Evaluating leave-one-season-out on: %s", list(seasons))
-
-    all_results = []
-    mlflow.set_tracking_uri(f"sqlite:///{REPO_ROOT / 'mlflow.db'}")
-    mlflow.set_experiment("hazecast-sg-loso")
-    for target in TARGETS:
-        for season_name, (start, end) in seasons.items():
-            with mlflow.start_run(run_name=f"{target}_{season_name}"):
-                mlflow.log_params({
-                    "target": target, "held_out_season": season_name,
-                    "season_start": start, "season_end": end,
-                    "n_features": len(feature_cols),
-                })
-                fold_results = run_season_fold(gold, target, feature_cols, season_name, start, end)
-                for r in fold_results:
-                    prefix = r["model"]
-                    for k, v in r.items():
-                        if isinstance(v, (int, float)) and not isinstance(v, bool):
-                            mlflow.log_metric(f"{prefix}_{k}", v)
-                all_results.extend(fold_results)
-    return pd.DataFrame(all_results)
-
-
-def train_final_models(gold: pd.DataFrame) -> dict[str, Path]:
-    """Fit one XGBoost model per region on ALL available labelled rows
-    (not just the LOSO folds) and persist + register each in MLflow. This
-    is the model the batch scoring job actually loads.
-
-    Uses the quantile objective (hazecast.config.XGB_QUANTILE_ALPHA), not
-    plain MAE regression -- see the module docstring and README "Results"
-    for why: evaluated on real data, this roughly triples elevated-day
-    recall versus the MAE-minimizing variant, which is what actually
-    matters for an early-warning tool. save_model()/load_model() were
-    verified to round-trip a quantile model's predictions exactly (the
-    objective is stored in the saved file), so hazecast.score doesn't need
-    any change to load it correctly.
+    joblib artifacts must only be loaded from a trusted training directory.
+    The daily scoring contract stays independent of hourly model artifacts.
     """
-    feature_cols = _feature_columns(gold)
+    gold = _prepare(gold)
+    summary, selections, cols = _evaluate(gold)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    mlflow.set_tracking_uri(f"sqlite:///{REPO_ROOT / 'mlflow.db'}")
-    mlflow.set_experiment("hazecast-sg-production")
-
+    summary.to_csv(MODELS_DIR / "eval_summary.csv", index=False)
+    manifest = dict(schema_version=1, pipeline="daily", feature_columns=cols,
+                    horizon_days=FORECAST_HORIZON_DAYS,
+                    threshold=PM25_ELEVATED_THRESHOLD, models={})
     paths = {}
-    for target in TARGETS:
-        label_col = f"label_{target}"
-        complete = gold[feature_cols + [label_col]].notna().all(axis=1)
-        train = gold.loc[complete]
-        if len(train) < 100:
-            log.warning("target=%s: only %d fully-featured rows, skipping final fit", target, len(train))
-            continue
-        model = XGBRegressor(
-            **XGB_PARAMS, objective="reg:quantileerror", quantile_alpha=XGB_QUANTILE_ALPHA,
-        ).fit(train[feature_cols], train[label_col])
-
-        out_path = MODELS_DIR / f"xgb_{target}.json"
-        model.save_model(out_path)
-        paths[target] = out_path
-
-        with mlflow.start_run(run_name=f"final_{target}"):
-            mlflow.log_params({"target": target, "n_train": len(train), "n_features": len(feature_cols)})
-            mlflow.xgboost.log_model(model, name=f"model_{target}")
-            mlflow.log_artifact(str(out_path))
-
-    (MODELS_DIR / "feature_columns.json").write_text(json.dumps(feature_cols, indent=2))
+    for target, selection in selections.items():
+        rows = _complete(gold, cols, target)
+        model = _fit(selection["model"], rows, cols, target)
+        with mlflow.start_run(run_name=f"final_{target}_{selection['model']}") as run:
+            mlflow.log_params(dict(target=target, model=selection["model"], n_train=len(rows),
+                                   horizon_days=FORECAST_HORIZON_DAYS, n_features=len(cols)))
+            for split in ("validation", "final_test"):
+                mlflow.log_metrics({f"{split}_{k}": v for k, v in selection[split].items()
+                                    if np.isfinite(v)})
+            entry = {**selection, "run_id": run.info.run_id, "artifact": None,
+                     "training_end": rows.date.max().isoformat()}
+            if model is not None:
+                # Unique names keep the previous manifest valid until publication.
+                path = MODELS_DIR / f"daily_{target}_{run.info.run_id}.joblib"
+                joblib.dump(model, path)
+                paths[target] = path
+                entry["artifact"] = path.name
+                _log_selected_model(model, selection["model"])
+                mlflow.log_artifact(str(path))
+            mlflow.log_dict(_json_safe(entry), "selection.json")
+            manifest["models"][target] = entry
+    (MODELS_DIR / "feature_columns.json").write_text(json.dumps(cols, indent=2))
+    temporary = MODELS_DIR / "daily_model_manifest.tmp"
+    temporary.write_text(json.dumps(_json_safe(manifest), indent=2, allow_nan=False))
+    temporary.replace(MODELS_DIR / "daily_model_manifest.json")
     return paths
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    gold_df = pd.read_parquet(GOLD_DIR / "daily_features.parquet")
-    gold_df["date"] = pd.to_datetime(gold_df["date"])
-
-    eval_df = evaluate_all(gold_df)
-    summary_path = MODELS_DIR / "eval_summary.csv"
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    eval_df.to_csv(summary_path, index=False)
-    log.info("Wrote evaluation summary (%d rows) to %s", len(eval_df), summary_path)
-
-    pivot = eval_df.pivot_table(index=["target", "season"], columns="model", values="mae")
-    log.info("MAE by target/season (lower is better), all 4 candidates:\n%s", pivot.round(2))
-
-    model_paths = train_final_models(gold_df)
-    log.info("Saved final models: %s", {k: str(v) for k, v in model_paths.items()})
+    paths = train_final_models(pd.read_parquet(GOLD_DIR / "daily_features.parquet"))
+    log.info("Published daily model manifest and %d fitted artifacts", len(paths))

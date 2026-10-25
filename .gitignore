@@ -39,3 +39,17 @@ airflow.cfg
 
 # live downloads (re-fetched with python -m hazecast.refresh)
 data/raw/**/*live*.csv
+
+# auto-downloaded history (re-fetched with python -m hazecast.ingest.historical);
+# the committed LFS files are the seed, these top them up
+data/raw/pm25/*_datagov.csv
+data/raw/pm25/*_rtapi_*.csv
+data/raw/weather/*_hist_*.csv
+data/raw/firms/fire_*_api_*.csv
+data/raw/firms/fetch_log.json
+
+# runtime outputs of inference / monitoring / generated reports
+data/monitoring/
+data/gold/*.tmp
+reports/monitoring/
+reports/data_quality/

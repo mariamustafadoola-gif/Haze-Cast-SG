@@ -155,7 +155,7 @@ def write_weather_raw(past_days: int, raw_dir: Path = RAW_DIR / "weather", now: 
         text = trim_future_hours(fetch_weather_csv(lat, lon, past_days), now)
         ns, ew = ("N" if lat >= 0 else "S"), ("E" if lon >= 0 else "W")
         path = raw_dir / f"open-meteo-{abs(lat):.2f}{ns}{abs(lon):.2f}{ew}_live_{point}.csv"
-        path.write_text(text)
+        path.write_text(text, encoding="utf-8")
         paths.append(path)
         log.info("weather[%s]: %d hours", point, max(len(text.splitlines()) - 4, 0))
     return paths

@@ -29,38 +29,58 @@ any region forecast to cross the NEA "Elevated" band (56 ug/m3).
 
 ## Architecture
 
+This branch (`e2e-pipeline`) joins the data pipeline (`data` branch) and
+the model pipeline (`Model_build_train_inference_monitor` branch) into one
+pipeline orchestrated by Airflow:
+
 ```
-Sources (PM2.5, FIRMS, weather)
-  -> ingest (Airflow, nightly)
-  -> bronze (raw, as received)
-  -> silver (cleaned, gap-flagged, hourly grid)
-  -> gold (daily feature + label table, per region)
-  -> train (persistence / linreg / XGBoost, leave-one-season-out eval, MLflow)
-  -> score (batch, nightly)
-  -> serve (FastAPI, reads the latest scored forecast -- doesn't score on request)
+ Sources: data.gov.sg PM2.5 · Open-Meteo weather · NASA FIRMS fires
+   |  hazecast.ingest.historical (backfill / daily top-up)   hazecast.ingest.live (hourly)
+   v
+ data/raw -> bronze (fixed raw) -> silver (hourly grid, short gaps filled) -> gold (hourly + daily features)
+   |                                                                            |
+   |  hazecast_retrain (monthly / triggered)                                   |  hazecast_hourly (every hour)
+   |   six candidates x 6 targets x 3 horizons, forward validation, MLflow     |   freshness gate -> 18 forecasts
+   |   -> challenger in staging -> holdout replay -> promotion gate             |   -> forecast ledger (SQLite)
+   |   -> champion (data/models/hourly) -> monitoring baseline                  |   -> latest_hourly_forecast.json -> FastAPI
+   v                                                                            v
+ hazecast_monitoring (daily): NEA actuals -> data quality · model quality · bias drift ·
+   feature attribution drift -> dashboard -> governance decision -> (trigger retrain | investigate | fix data)
 ```
 
-Everything runs locally via `docker compose up` (Airflow + MLflow + the
-scoring API); see [Running it](#running-it).
+Everything runs locally via `docker compose up` (Airflow + Postgres +
+MLflow + the API); see [End-to-end pipeline](#end-to-end-pipeline). The
+governance and model-refresh SOP is in
+[`docs/MODEL_GOVERNANCE.md`](docs/MODEL_GOVERNANCE.md).
 
 ## Repo layout
 
 ```
 src/hazecast/
-  config.py            regions, fire-region boxes, weather points, thresholds, haze seasons
-  ingest/pm25.py        NEA Historical 1-hr PM2.5 -> bronze
-  ingest/firms.py        NASA FIRMS active-fire detections -> bronze
-  ingest/weather.py      Open-Meteo historical weather (5 points) -> bronze
-  bronze_to_silver.py    cleaning, gap-flagging, hourly/daily alignment
-  silver_to_gold.py      daily feature + label table (leak-free by construction)
-  train.py               persistence / linreg / XGBoost, leave-one-season-out eval, MLflow logging
-  score.py               batch scoring -> data/gold/latest_forecast.json
-serving/app.py            FastAPI: /forecast, /forecast/{region}, /health, /config
-dags/                     Airflow DAGs (daily pipeline, monthly retrain)
-docker/                   Dockerfile(s)
-notebooks/                pipeline_walkthrough.ipynb -- same 5 steps as "Running it" below, interactive
-tests/                    fast smoke tests on synthetic fixtures (no real data needed)
-data/README.md            how to get the 3 real datasets (not committed -- see below)
+  config.py              regions, fire boxes, weather points, thresholds, selected features, monitoring thresholds
+  ingest/historical.py   automated history download for training (coverage-driven, resumable)
+  ingest/live.py         latest hours from the live APIs for inference
+  ingest/pm25.py, firms.py, weather.py   raw files -> bronze
+  bronze_to_silver.py    cleaning, short-gap filling, gap flags
+  silver_to_gold.py      hourly + daily feature/label tables (leak-free by construction)
+  data_quality.py        data-quality report on the medallion layers
+  refresh.py             one call: (fetch) -> bronze -> silver -> gold -> data-quality report
+  hourly_model.py        six-candidate hourly comparison (+6/12/24 h), forward validation, MLflow
+  train.py               same comparison for the next-day daily model
+  inference.py           hourly production inference -> forecast ledger
+  monitoring.py          verifies archived forecasts against NEA actuals
+  model_monitor.py       data quality, model quality, bias drift, attribution drift + retraining rule
+  monitor_backtest.py    replays the holdout through the monitors (performance over ~2.5 years)
+  dashboard.py           performance & stability dashboard (HTML)
+  governance.py          champion/challenger promotion gate, rollback
+  orchestration.py       the task functions the DAGs call
+serving/app.py            FastAPI: /forecast/hourly, /forecast, /model, /monitoring, /monitoring/dashboard
+dags/                     hazecast_backfill, hazecast_hourly, hazecast_monitoring, hazecast_retrain
+docker/                   pipeline.Dockerfile (API, Jupyter), airflow.Dockerfile
+docs/MODEL_GOVERNANCE.md  deployment choice, monitors, retraining triggers, promotion/rollback SOP
+notebooks/                EDA, cleaning/feature selection, pipeline walkthrough
+tests/                    fast tests on synthetic fixtures and mocked APIs (no real data needed)
+data/README.md            how the 3 datasets are downloaded (automated) and the manual reference steps
 ```
 
 ## Data
@@ -181,6 +201,42 @@ MLOps is the goal here, not a leaderboard score. Both `linreg` and
 document whichever is shipped, and the recall numbers behind it, in the
 final report.
 
+## End-to-end pipeline
+
+**With Docker (recommended):**
+```bash
+cp .env.example .env              # add FIRMS_MAP_KEY; change *_PORT if 8080/5000/8000 are taken
+docker compose up -d --build      # postgres, airflow (init/webserver/scheduler), mlflow, api
+```
+1. Airflow at `localhost:8080` (admin / admin). Trigger **`hazecast_backfill`** once.
+   It downloads whatever history `data/raw/` is missing, rebuilds the layers and
+   triggers **`hazecast_retrain`** (about an hour on a laptop). That run trains,
+   replays the holdout, promotes the first champion and writes the monitoring baseline.
+2. After that, **`hazecast_hourly`** issues 18 forecasts every hour, and
+   **`hazecast_monitoring`** runs the four monitors each night and triggers
+   retraining when the governance rule says so.
+3. Results: `localhost:8000/forecast/hourly`, `/monitoring`,
+   `/monitoring/dashboard` (live) and `/monitoring/dashboard?kind=backtest`
+   (holdout replay); MLflow at `localhost:5000`.
+
+**Without Docker, the same steps by hand:**
+```bash
+pip install -r requirements.txt && export PYTHONPATH=src
+python -m hazecast.ingest.historical          # training history (only what's missing)
+python -m hazecast.refresh --days 3           # live hours + bronze/silver/gold
+python -m hazecast.hourly_model               # train + select 18 models (straight to production)
+python -m hazecast.monitor_backtest           # holdout replay -> reports/monitoring/backtest_dashboard.html
+python -m hazecast.model_monitor baseline     # monitoring baseline for the champion
+python -m hazecast.inference                  # 18 forecasts -> ledger + latest_hourly_forecast.json
+python -m hazecast.monitoring                 # NEA actuals for archived forecasts (next day)
+python -m hazecast.model_monitor run          # four monitors + governance decision
+python -m hazecast.dashboard                  # reports/monitoring/dashboard.html
+```
+
+Model refresh, promotion and rollback are in
+[`docs/MODEL_GOVERNANCE.md`](docs/MODEL_GOVERNANCE.md)
+(`python -m hazecast.governance status | promote | rollback`).
+
 ## Running it
 
 **1. Get the data** -- see [`data/README.md`](data/README.md).
@@ -272,6 +328,17 @@ Use `--no-fetch` to rebuild from the files already in `data/raw/`.
 
 ## What's tested vs. not
 
+### End-to-end pipeline (`e2e-pipeline` branch, verified 2026-10-25)
+
+- **Automated history download** (`hazecast.ingest.historical`): run against the real data.gov.sg and Open-Meteo APIs in both modes. Fresh clone: bulk PM2.5 + per-day API + 3 years of weather, loaded through bronze. Top-up: only the missing days, and a second run requests nothing. FIRMS: mocked tests only (needs a MAP_KEY).
+- **Training on the merged code:** `hazecast.hourly_model` on 110,015 real hours (~35 min). It selected `xgboost_q85` in all 18 groups, and the holdout matches the model team's numbers (central +6 h MAE 7.78, F2 0.69).
+- **Monitoring:** `hazecast.monitor_backtest` replayed 117 weekly windows over the 2024-26 holdout; thresholds calibrated from it (see `docs/PIPELINE_WALKTHROUGH.md` §4.3).
+- **Docker:** both images build. The full stack (Postgres, Airflow 2.10.5 LocalExecutor, MLflow, API) runs, and all four DAGs parse. `hazecast_hourly` and `hazecast_monitoring` ran end to end on schedule, and the freshness gate and `fix_data` branch behaved as designed without a FIRMS key. A manual `hazecast_retrain` trained, replayed, passed the promotion gate, promoted, archived the old champion and rebuilt the baseline (details in `docs/PIPELINE_WALKTHROUGH.md` §4.1).
+- **Tests:** 30 pass inside the Airflow image (`docker compose exec airflow-scheduler python -m pytest /opt/airflow/tests`), including DAG structure, promotion/rollback, the monitors, and the history fetcher.
+- **Not verified:** live hourly inference end to end (needs `FIRMS_MAP_KEY` for fresh fire features); alert delivery (the failure callback and `notify_investigate` only log, ready to be wired to Slack/email).
+
+### Original proof of concept (historical notes)
+
 This section exists so nobody re-discovers the same gap the hard way.
 
 **Actually run against real downloaded data in this proof of concept:**
@@ -322,9 +389,8 @@ This section exists so nobody re-discovers the same gap the hard way.
   checked and every function they call was confirmed to exist with a
   matching signature, but the DAG has not executed inside a real
   scheduler.
-- Any monitoring/drift job -- not built yet. `hazecast_retrain_dag.py`
-  has a TODO for a PSI-drift trigger the proposal calls for; right now
-  it's schedule-only (monthly).
+- ~~Any monitoring/drift job~~ Built on `e2e-pipeline`: `hazecast.model_monitor`
+  + `hazecast_monitoring` DAG, which triggers `hazecast_retrain`.
 - GitHub Actions / CI -- none set up yet.
 
 ## Next steps for the team

@@ -62,7 +62,8 @@ def _pm25_fixes(raw_dir: Path) -> list[dict]:
 
 def _firms_fixes(raw_dir: Path) -> list[dict]:
     cols = ["latitude", "longitude", "acq_date", "acq_time", "confidence"]
-    arch = [pd.read_csv(f, usecols=cols + ["type"], dtype={"acq_time": str})
+    # API archive files have no `type` column; treat them as vegetation fires (type 0), as the loader does
+    arch = [pd.read_csv(f, dtype={"acq_time": str}).reindex(columns=cols + ["type"]).fillna({"type": 0})
             for f in sorted(glob.glob(str(raw_dir / "fire_archive_*.csv")))]
     nrt = [pd.read_csv(f, usecols=cols, dtype={"acq_time": str})
            for f in sorted(glob.glob(str(raw_dir / "fire_nrt_*.csv")))]

@@ -1,8 +1,37 @@
 # Getting the raw data
 
-Nothing under `data/` is committed to git (see `.gitignore`) -- the PM2.5
-and weather licences are open but redistribution wasn't checked, and the
-FIRMS zip is large. Every teammate needs to download these once, locally.
+## Automated (recommended)
+
+All three sources can be downloaded by script, no manual clicking:
+
+```bash
+cp .env.example .env            # add FIRMS_MAP_KEY (free: https://firms.modaps.eosdis.nasa.gov/api/map_key/)
+export PYTHONPATH=src
+python -m hazecast.ingest.historical --dry-run   # what is missing between 2014-04-01 and yesterday
+python -m hazecast.ingest.historical             # download it (training history)
+python -m hazecast.ingest.live --days 3          # the latest hours (for inference)
+python -m hazecast.refresh --no-fetch            # rebuild bronze -> silver -> gold
+```
+
+`hazecast.ingest.historical` only requests what `data/raw/` doesn't already
+have, so it is safe to re-run. On a clone with the Git LFS files it just
+tops up the last few weeks; on a fresh clone it downloads everything:
+
+| Source | API used | Key |
+|---|---|---|
+| PM2.5 | data.gov.sg dataset download (`initiate-download` / `poll-download`) for the bulk file, then `v2/real-time/api/pm25?date=` per day after it ends | none (optional `DATA_GOV_SG_API_KEY` raises the rate limit) |
+| Weather | Open-Meteo archive API (ERA5), one request per point per year | none |
+| Fires | NASA FIRMS area API, `VIIRS_SNPP_SP` (science quality) up to its latest date, `VIIRS_SNPP_NRT` after | `FIRMS_MAP_KEY` |
+
+In Docker, the same code runs as Airflow DAGs: `hazecast_backfill`
+(manual, history), `hazecast_hourly` (live, every hour) and
+`hazecast_monitoring` (daily top-up that makes the live hours permanent).
+Auto-downloaded files are git-ignored; the LFS files below are the seed.
+
+## Manual download (reference)
+
+The original manual steps, kept for reference. The committed Git LFS files
+under `data/raw/` came from these.
 
 ## 1. PM2.5 (label + persistence feature)
 
