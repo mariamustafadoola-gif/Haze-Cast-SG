@@ -27,6 +27,7 @@ from hazecast.config import (
     PM25_ELEVATED_THRESHOLD, XGB_PARAMS, XGB_QUANTILE_ALPHA,
     MODEL_CANDIDATES, RANDOM_FOREST_PARAMS, RIDGE_ALPHA, LIGHTGBM_PARAMS, CV_SPLITS,
     FINAL_TEST_FRACTION, MIN_TRAIN_ROWS, MLFLOW_EXPERIMENT,
+    USE_SELECTED_FEATURES, SELECTED_FEATURES_DAILY,
 )
 
 log = logging.getLogger(__name__)
@@ -49,6 +50,9 @@ def _feature_columns(gold):
     # Exclude every label, including future horizons unknown to this module.
     cols = [c for c in gold if c not in NON_FEATURE_COLS
             and not c.startswith(("label_", "target_"))]
+    if USE_SELECTED_FEATURES:
+        # keep only the data team's selected set (see config.SELECTED_FEATURES_DAILY)
+        cols = [c for c in cols if c in SELECTED_FEATURES_DAILY]
     if not cols or any(not pd.api.types.is_numeric_dtype(gold[c]) for c in cols):
         raise ValueError("Gold features must be nonempty and numeric")
     return cols

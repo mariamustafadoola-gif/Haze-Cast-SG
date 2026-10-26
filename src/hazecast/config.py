@@ -51,6 +51,14 @@ WEATHER_POINTS = {
 #   Normal: 0-55, Elevated: 56-150, High: 151-250, Very High: >250
 PM25_ELEVATED_THRESHOLD = 56.0
 
+# Silver gap filling (data team, 2026-10). A gap of up to this many hours
+# in an hourly series is filled by straight-line interpolation between the
+# readings either side (wind direction: carried forward, since averaging
+# 359 and 1 degrees would give 180). Longer gaps are left empty on purpose:
+# guessing across a long gap could invent or erase a haze episode.
+# Every filled hour is marked in a `filled` column in silver.
+MAX_FILL_HOURS = 3
+
 # Forecast horizon: predict the next calendar day's daily-mean PM2.5,
 # per region, using only data observed up to "today". No same-day or
 # future weather is used (tomorrow's wind is unknown at forecast time).
@@ -200,3 +208,105 @@ MLFLOW_EXPERIMENT = "hazecast-sg-forward"
 # Active hourly comparison: independent selected model per region/horizon.
 HOURLY_MLFLOW_EXPERIMENT = "hazecast-sg-hourly-forward"
 HOURLY_TIMEZONE = "Asia/Singapore"
+
+
+# ---------------------------------------------------------------------------
+# Selected features (data team, 2026-10). The gold tables still contain all
+# 56 candidate features; training only uses the lists below.
+#
+# How they were chosen, step by step with charts:
+#     notebooks/01_eda.ipynb (why) and
+#     notebooks/02_cleaning_and_feature_selection.ipynb (how)
+# Re-run the selection (rewrites reports/feature_reduction/):
+#     python experiments/feature_reduction.py --grain hourly --quick
+#
+# Validated with leave-one-haze-season-out (2015 and 2019): the reduced
+# hourly set (36) matched all 56 at h=1 and h=6: average error within
+# 0.3 ug/m3 and unhealthy-hours-caught within 1 percentage point. NOTE for the
+# model team: HOURLY_TUNED_SETTINGS above were tuned on all 56 features;
+# re-check them on this set before reporting final numbers. The six-candidate
+# hourly comparison (MODEL_CANDIDATES) also trains on this set when
+# USE_SELECTED_FEATURES is True.
+#
+# Set USE_SELECTED_FEATURES = False to go back to all 56 (e.g. to compare).
+# ---------------------------------------------------------------------------
+USE_SELECTED_FEATURES = True
+
+SELECTED_FEATURES_HOURLY = [
+    "fire_sumatra_lag0",
+    "fire_sumatra_lag2",
+    "fire_sumatra_lag3",
+    "fire_sumatra_roll3",
+    "fire_kalimantan_lag0",
+    "fire_kalimantan_lag2",
+    "fire_kalimantan_lag3",
+    "fire_kalimantan_roll3",
+    "fire_data_gap_recent",
+    "wind_speed_singapore",
+    "rain_singapore_mm",
+    "rain_singapore_roll3h",
+    "rain_singapore_roll24h",
+    "wind_speed_riau",
+    "rain_riau_mm",
+    "rain_riau_roll24h",
+    "wind_speed_palembang",
+    "rain_palembang_mm",
+    "rain_palembang_roll3h",
+    "rain_palembang_roll24h",
+    "wind_speed_pontianak",
+    "rain_pontianak_mm",
+    "rain_pontianak_roll3h",
+    "rain_pontianak_roll24h",
+    "wind_speed_palangka",
+    "rain_palangka_mm",
+    "rain_palangka_roll3h",
+    "rain_palangka_roll24h",
+    "upwind_sumatra",
+    "upwind_kalimantan",
+    "now_north",
+    "now_south",
+    "now_east",
+    "now_west",
+    "now_central",
+    "now_national",
+]
+
+SELECTED_FEATURES_DAILY = [
+    "fire_sumatra_lag0",
+    "fire_sumatra_lag1",
+    "fire_sumatra_lag2",
+    "fire_sumatra_lag3",
+    "fire_sumatra_roll7",
+    "fire_kalimantan_lag0",
+    "fire_kalimantan_lag2",
+    "fire_kalimantan_lag3",
+    "fire_kalimantan_roll3",
+    "fire_data_gap_recent",
+    "wind_speed_singapore",
+    "rain_singapore_mm",
+    "rain_singapore_roll3",
+    "rain_singapore_roll7",
+    "wind_speed_riau",
+    "rain_riau_mm",
+    "rain_riau_roll3",
+    "rain_riau_roll7",
+    "wind_speed_palembang",
+    "rain_palembang_mm",
+    "rain_palembang_roll3",
+    "rain_palembang_roll7",
+    "wind_speed_pontianak",
+    "rain_pontianak_mm",
+    "rain_pontianak_roll3",
+    "wind_speed_palangka",
+    "rain_palangka_mm",
+    "rain_palangka_roll3",
+    "rain_palangka_roll7",
+    "upwind_sumatra",
+    "upwind_kalimantan",
+    "today_north",
+    "today_south",
+    "today_east",
+    "today_west",
+    "today_central",
+    "today_national",
+]

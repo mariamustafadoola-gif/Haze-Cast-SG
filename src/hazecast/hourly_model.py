@@ -18,6 +18,7 @@ from hazecast.config import (
     GOLD_DIR, MODELS_DIR, SG_REGIONS, HOURLY_HORIZONS, HOURLY_TIMEZONE,
     PM25_ELEVATED_THRESHOLD, MODEL_CANDIDATES, CV_SPLITS,
     FINAL_TEST_FRACTION, MIN_TRAIN_ROWS, HOURLY_MLFLOW_EXPERIMENT, REPO_ROOT,
+    USE_SELECTED_FEATURES, SELECTED_FEATURES_HOURLY,
 )
 from hazecast.train import _make_model, _metrics, _json_safe, _log_selected_model
 
@@ -47,6 +48,9 @@ def _prepare(gold):
 def _feature_columns(gold):
     cols = [c for c in gold if c not in {"date", "label_low_coverage"}
             and not c.startswith(("label_", "target_"))]
+    if USE_SELECTED_FEATURES:
+        # keep only the data team's selected set (see config.SELECTED_FEATURES_HOURLY)
+        cols = [c for c in cols if c in SELECTED_FEATURES_HOURLY]
     if not cols or any(not pd.api.types.is_numeric_dtype(gold[c]) for c in cols):
         raise ValueError("Hourly features must be nonempty and numeric")
     return cols

@@ -227,6 +227,49 @@ MLflow UI: `localhost:5000`. Airflow UI: `localhost:8080` (see the note
 at the top of `docker-compose.yml` about first-run DB init). API:
 `localhost:8000/forecast`. JupyterLab: `localhost:8888/lab`.
 
+## Data Pipeline
+
+Owned by the data team (Maria, Anu). **Status: complete** on the `data` branch.
+Data currently runs from April 2014 to the latest live refresh.
+
+| Layer | What it does | Code |
+|---|---|---|
+| Bronze | Reads raw files and fixes known errors: broken timestamps, repeated hours, repeated fire records, fires outside Sumatra and Kalimantan, gas flares and volcanoes | `src/hazecast/ingest/` |
+| Silver | One complete hourly clock; gaps of up to 3 hours filled; satellite gaps in the fire data flagged, never filled | `src/hazecast/bronze_to_silver.py` |
+| Gold | Hourly and daily model tables, 56 candidate features each | `src/hazecast/silver_to_gold.py` |
+| Feature selection | 56 features cut to 36 (hourly) and 37 (daily) with the same accuracy; training uses them automatically | `config.py` (`SELECTED_FEATURES_HOURLY`, `USE_SELECTED_FEATURES`) |
+| Data quality | Counts every fix and gap, runs 7 checks | `src/hazecast/data_quality.py` |
+| Live refresh | Downloads the latest PM2.5 (data.gov.sg), weather (Open-Meteo) and fires (NASA FIRMS), then rebuilds bronze, silver and gold | `src/hazecast/ingest/live.py`, `src/hazecast/refresh.py` |
+
+Two notebooks explain every step with charts: `notebooks/01_eda.ipynb` (what the data shows)
+and `notebooks/02_cleaning_and_feature_selection.ipynb` (how it was cleaned and why 36 features).
+
+### Refreshing to Live Data
+
+No local Python needed; this uses the project's Docker image.
+
+1. Copy `.env.example` to `.env` and add a free NASA FIRMS key
+   ([get one here](https://firms.modaps.eosdis.nasa.gov/api/map_key/)). `.env` is never committed.
+2. Start Docker Desktop, then from the project folder: `docker compose up --build jupyter`
+3. Open `localhost:8888/lab`, then **File > New > Terminal**, and run:
+   ```bash
+   python -m hazecast.refresh --days 10
+   ```
+4. It ends with the newest hour that is ready to forecast from. Verified on 23 October 2026:
+   all three sources downloaded and the gold table was current to 16:00 SGT that day.
+
+The nightly Airflow DAG (`dags/hazecast_daily_dag.py`) runs the same download as its first task.
+Use `--no-fetch` to rebuild from the files already in `data/raw/`.
+
+### Next Steps for the Model Team
+
+1. Add an hourly forecast step that predicts 1 and 6 hours ahead from the newest row of
+   `data/gold/hourly_features.parquet` (`score.py` currently scores the daily model only).
+2. Re-check `HOURLY_TUNED_SETTINGS` on the 36 selected features (they were tuned on all 56).
+3. Demo days (3 and 4 November): run the live refresh, then the forecast. Rehearse on 2 November.
+4. Decide whether the 2026 haze season becomes a third test season once it ends. It was kept
+   out of feature selection so that test stays fair.
+
 ## What's tested vs. not
 
 This section exists so nobody re-discovers the same gap the hard way.
@@ -269,12 +312,10 @@ This section exists so nobody re-discovers the same gap the hard way.
   treat it as unconfirmed and re-run `docker compose up --build jupyter`
   yourself.
 
-**NOT run/verified in the environment this was built in, because it had
-no outbound network to these hosts -- confirm on a normal machine before
-relying on them:**
-- The live-API ingestion paths mentioned in each `ingest/*.py` module's
-  docstring (data.gov.sg PM2.5 API, Open-Meteo archive API, FIRMS area
-  API). Only the manual-download path was exercised.
+**Live data:** the live download of all three sources was run end to end on
+23 October 2026 (see [Refreshing to Live Data](#refreshing-to-live-data)).
+
+**Not yet verified:**
 - Actually building/running the Docker images (`docker build` failed
   here with no daemon available) and the Airflow container specifically
   (its image is large; wasn't pulled here). The DAG files were syntax-
@@ -297,9 +338,9 @@ relying on them:**
 2. Build the monitoring job (data quality, PSI/feature drift, 30-day
    rolling error vs. persistence) the proposal describes -- currently
    the biggest structural gap vs. the proposal deck.
-3. Verify the live-API ingestion paths and the Airflow container on a
-   machine with normal network access, then switch `data/raw/` from a
-   manual download to the nightly DAG actually pulling fresh data.
+3. ~~Verify the live-API ingestion paths~~ Done: see
+   [Data Pipeline](#data-pipeline). Still open: run the Airflow container
+   itself and confirm the nightly DAG pulls fresh data on schedule.
 4. Once the 2026 haze season's PM2.5 labels are complete, add a "2026"
    entry to `hazecast.config.HAZE_SEASONS` and re-run `hazecast.train`
    for a third fold -- no other code changes needed.
