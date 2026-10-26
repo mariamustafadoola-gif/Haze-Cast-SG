@@ -20,7 +20,7 @@ tops up the last few weeks; on a fresh clone it downloads everything:
 | Source | API used | Key |
 |---|---|---|
 | PM2.5 | data.gov.sg dataset download (`initiate-download` / `poll-download`) for the bulk file, then `v2/real-time/api/pm25?date=` per day after it ends | none (optional `DATA_GOV_SG_API_KEY` raises the rate limit) |
-| Weather | Open-Meteo archive API (ERA5), one request per point per year | none |
+| Weather | Open-Meteo archive API (default model blend, as in the manual downloads), one request per point per year; the last 2 days are re-fetched on every run because the newest hours are still being revised | none |
 | Fires | NASA FIRMS area API, `VIIRS_SNPP_SP` (science quality) up to its latest date, `VIIRS_SNPP_NRT` after | `FIRMS_MAP_KEY` |
 
 In Docker, the same code runs as Airflow DAGs: `hazecast_backfill`

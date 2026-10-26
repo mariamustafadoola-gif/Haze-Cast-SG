@@ -22,7 +22,8 @@ Sources (see data/README.md):
              ("Historical 1-hr PM2.5", 2014-04 onwards, updated roughly monthly)
           2. https://api-open.data.gov.sg/v2/real-time/api/pm25?date=YYYY-MM-DD
              for the days after the bulk file ends (served from mid-2016)
-  Weather https://archive-api.open-meteo.com/v1/archive  (ERA5, no key), one file per point per year
+  Weather https://archive-api.open-meteo.com/v1/archive  (Open-Meteo's default model blend, no key),
+          one file per point per year; the last WEATHER_REFETCH_DAYS are re-fetched every run
   Fires   https://firms.modaps.eosdis.nasa.gov/api/area/csv/<KEY>/<SOURCE>/<area>/<days>/<date>
           VIIRS_SNPP_SP (science quality) where available, VIIRS_SNPP_NRT after that;
           needs FIRMS_MAP_KEY in env or .env
@@ -50,7 +51,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
-from hazecast.config import RAW_DIR, SG_REGIONS, WEATHER_POINTS, HISTORY_START
+from hazecast.config import RAW_DIR, SG_REGIONS, WEATHER_POINTS, HISTORY_START, WEATHER_REFETCH_DAYS
 from hazecast.ingest import live
 from hazecast.ingest.weather import _nearest_point_name
 
@@ -200,19 +201,32 @@ def _clean_weather_csv(text: str, now: datetime) -> tuple[list[str], list[str]]:
     return head, keep
 
 
+def _merge_weather_rows(old: list[str], new: list[str]) -> list[str]:
+    """Combine CSV data lines by timestamp; a re-fetched hour replaces the stored one."""
+    rows = {ln.split(",", 1)[0]: ln for ln in old}
+    rows.update({ln.split(",", 1)[0]: ln for ln in new})
+    return [rows[ts] for ts in sorted(rows)]
+
+
 def fetch_weather_history(start: date, end: date, raw_dir: Path = RAW_DIR / "weather",
-                          dry_run: bool = False, delay: float = 1.0) -> dict:
+                          dry_run: bool = False, delay: float = 1.0,
+                          refetch_days: int = WEATHER_REFETCH_DAYS) -> dict:
     now = live.SGT_NOW()
     covered = weather_covered_hours(raw_dir)
     raw_dir.mkdir(parents=True, exist_ok=True)
     out = {}
+    # Open-Meteo still revises the most recent hours for about a day after they are first
+    # served (checked 2026-10-26: only the last ~4 hours of a download changed later), so
+    # the last `refetch_days` before `end` are always requested again, even if stored.
+    refresh_from = pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(days=refetch_days)
     for point, (lat, lon) in WEATHER_POINTS.items():
         hours = pd.date_range(start, pd.Timestamp(end) + pd.Timedelta(hours=23), freq="h")
         hours = hours[hours <= pd.Timestamp(now)]
-        missing = hours[~hours.isin(list(covered[point]))]
+        missing = hours[~hours.isin(list(covered[point])) | (hours >= refresh_from)]
         years = sorted({t.year for t in missing})
         out[point] = {"missing_hours": len(missing), "years": years}
-        log.info("weather[%s]: %d hours missing (years %s)", point, len(missing), years or "none")
+        log.info("weather[%s]: %d hours to fetch (years %s; last %d day(s) always re-fetched)",
+                 point, len(missing), years or "none", refetch_days)
         if dry_run:
             continue
         for year in years:
@@ -221,10 +235,9 @@ def fetch_weather_history(start: date, end: date, raw_dir: Path = RAW_DIR / "wea
             head, body = _clean_weather_csv(text, now)
             ns, ew = ("N" if lat >= 0 else "S"), ("E" if lon >= 0 else "W")
             path = raw_dir / f"open-meteo-{abs(lat):.2f}{ns}{abs(lon):.2f}{ew}_hist_{point}_{year}.csv"
-            if path.exists():  # keep earlier rows of this year's file; new hours appended, duplicates dropped
+            if path.exists():  # keep this year's earlier rows; re-fetched hours replace stored ones
                 _, old = _clean_weather_csv(path.read_text(encoding="utf-8"), now)
-                body = list(dict.fromkeys(old + body))
-                body.sort(key=lambda ln: ln.split(",", 1)[0])
+                body = _merge_weather_rows(old, body)
             path.write_text("\n".join(head + body) + "\n", encoding="utf-8")
             log.info("weather[%s] %d: %d hours -> %s", point, year, len(body), path.name)
             time.sleep(delay)

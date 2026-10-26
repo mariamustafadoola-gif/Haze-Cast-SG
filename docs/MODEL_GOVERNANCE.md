@@ -22,7 +22,7 @@ same pull request.
 
 | Option | How it would work | Verdict |
 |---|---|---|
-| **Batch inference + read-only API** *(chosen)* | Airflow scores once an hour after new data lands, writes the ledger and `latest_hourly_forecast.json`; FastAPI serves the file | The inputs (NEA hourly PM2.5, ERA5 weather, daily-ish FIRMS) only change once an hour, so scoring on request adds nothing. It is cheap, every forecast is reproducible from the ledger, and the API never touches model code |
+| **Batch inference + read-only API** *(chosen)* | Airflow scores once an hour after new data lands, writes the ledger and `latest_hourly_forecast.json`; FastAPI serves the file | The inputs (NEA hourly PM2.5, Open-Meteo hourly weather, daily-ish FIRMS) only change once an hour, so scoring on request adds nothing. It is cheap, every forecast is reproducible from the ledger, and the API never touches model code |
 | Real-time endpoint (model behind `/predict`) | Load the 18 models in the API process and score each request | No benefit while features update hourly. It adds latency, scaling and model-loading concerns, plus a second code path that could diverge from what is monitored |
 | Managed endpoint (SageMaker / Vertex / Azure ML) | Register the model, deploy an endpoint, use the platform's Model Monitor | The natural next step if the project moves to the cloud. The four monitors here deliberately mirror SageMaker Model Monitor's four types (data quality, model quality, bias drift, feature attribution drift), so the move is mostly plumbing |
 | Shadow / canary | Score the challenger alongside the champion for N days before switching | Supported cheaply because forecasts are batch: see §6, "Optional shadow period" |

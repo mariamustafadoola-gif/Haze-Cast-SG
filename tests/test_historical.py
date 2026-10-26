@@ -89,3 +89,35 @@ def test_weather_clean_drops_empty_and_future_rows():
             "2026-01-01T00:00,4.7,94,0.00\n2026-01-01T01:00,,,\n2026-01-01T02:00,3.0,90,0.1\n")
     head, body = h._clean_weather_csv(text, pd.Timestamp("2026-01-01 01:30").to_pydatetime())
     assert len(head) == 4 and body == ["2026-01-01T00:00,4.7,94,0.00"]
+
+
+def _meteo_csv(start, hours, wind):
+    ts = pd.date_range(start, periods=hours, freq="h")
+    head = ("latitude,longitude,elevation,utc_offset_seconds,timezone,timezone_abbreviation\n"
+            "1.37,103.8,62.0,28800,Asia/Singapore,GMT+8\n\n"
+            "time,wind_speed_10m (km/h),wind_direction_10m (°),precipitation (mm)\n")
+    return head + "".join(f"{t:%Y-%m-%dT%H:%M},{wind},90,0.00\n" for t in ts)
+
+
+def test_weather_top_up_refetches_recent_days_and_new_values_win(tmp_path, monkeypatch):
+    from hazecast.config import WEATHER_POINTS
+    monkeypatch.setattr(h, "WEATHER_POINTS", {"singapore": WEATHER_POINTS["singapore"]})
+    monkeypatch.setattr(h.live, "SGT_NOW", lambda: pd.Timestamp("2026-01-10 05:00").to_pydatetime())
+    stored = tmp_path / "open-meteo-1.37N103.80E_hist_singapore_2026.csv"
+    stored.write_text(_meteo_csv("2026-01-01 00:00", 24 * 9, wind=1.0), encoding="utf-8")  # 1-9 Jan, preliminary
+    requests = []
+
+    def fake_fetch(lat, lon, start, end):
+        requests.append((start, end))
+        return _meteo_csv(f"{start} 00:00", ((end - start).days + 1) * 24, wind=7.0)  # revised values
+
+    monkeypatch.setattr(h, "fetch_weather_year", fake_fetch)
+    out = h.fetch_weather_history(date(2026, 1, 1), date(2026, 1, 9), raw_dir=tmp_path, delay=0, refetch_days=2)
+
+    assert requests == [(date(2026, 1, 8), date(2026, 1, 9))]          # only the last 2 days, though all were stored
+    assert out["singapore"]["missing_hours"] == 48
+    rows = pd.read_csv(stored, skiprows=3)
+    rows.columns = ["ts", "wind", "dir", "rain"]
+    assert rows.ts.is_unique and len(rows) == 24 * 9                   # replaced in place, no duplicate hours
+    assert (rows.set_index("ts").wind.loc["2026-01-08T00:00":] == 7.0).all()
+    assert (rows.set_index("ts").wind.loc[:"2026-01-07T23:00"] == 1.0).all()

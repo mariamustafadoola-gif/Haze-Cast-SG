@@ -21,6 +21,9 @@ MONITORING_DIR = DATA_DIR / "monitoring"
 # First day of training history (matches the manual downloads in
 # data/README.md). hazecast.ingest.historical backfills from here.
 HISTORY_START = "2014-04-01"
+# Weather hours re-requested on every history top-up, even if already stored: Open-Meteo
+# revises the newest hours for about a day after first serving them.
+WEATHER_REFETCH_DAYS = 2
 
 # ---------------------------------------------------------------------------
 # Regions: Singapore's 5 NEA reporting regions (must match the PM2.5 file's
