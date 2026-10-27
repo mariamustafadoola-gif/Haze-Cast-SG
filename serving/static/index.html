@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HazeCast SG — Hourly Forecast</title>
+<style>
+  :root {
+    --slate: #3D4F66;
+    --slate-dark: #2B3A4D;
+    --terracotta: #B85042;
+    --amber: #E8A33D;
+    --green: #2E7D4F;
+    --green-bg: #DCEEE2;
+    --red: #B85042;
+    --red-bg: #F6E3E0;
+    --ink: #1E242C;
+    --muted: #5B6472;
+    --paper: #FFFFFF;
+    --line: #E3E6EA;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Calibri, Arial, sans-serif;
+    background: #F7F8FA;
+    color: var(--ink);
+  }
+  header {
+    background: var(--slate);
+    color: #fff;
+    padding: 1.1rem 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+  header h1 { font-size: 1.25rem; margin: 0; font-weight: 700; }
+  header .sub { font-size: 0.85rem; color: #C9D2DC; margin-top: 0.15rem; }
+  .status-bar {
+    display: flex; align-items: center; gap: 1.25rem; flex-wrap: wrap;
+    font-size: 0.85rem; color: #E8ECF1;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 0.4rem; }
+  .dot.ok { background: #5FD38B; }
+  .dot.bad { background: #E8617A; }
+  .dot.pending { background: #999; }
+  button#refreshBtn {
+    background: #fff; color: var(--slate); border: none; border-radius: 6px;
+    padding: 0.45rem 0.9rem; font-size: 0.85rem; font-weight: 600; cursor: pointer;
+  }
+  button#refreshBtn:hover { background: #EDF1F5; }
+  main { max-width: 1100px; margin: 0 auto; padding: 1.5rem; }
+  .banner {
+    border-radius: 8px; padding: 0.75rem 1rem; margin-bottom: 1.25rem;
+    font-size: 0.9rem; display: none;
+  }
+  .banner.show { display: block; }
+  .banner.warn { background: var(--red-bg); color: #7A2E24; border: 1px solid #E2BBB4; }
+  .banner.error { background: var(--red-bg); color: #7A2E24; border: 1px solid #E2BBB4; }
+  .meta-row {
+    display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1.25rem;
+    font-size: 0.85rem; color: var(--muted);
+  }
+  .meta-row strong { color: var(--ink); }
+  .horizon-tabs { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+  .horizon-tabs button {
+    border: 1px solid var(--line); background: #fff; color: var(--muted);
+    padding: 0.4rem 1rem; border-radius: 999px; font-size: 0.85rem; cursor: pointer;
+    font-weight: 600;
+  }
+  .horizon-tabs button.active { background: var(--slate); color: #fff; border-color: var(--slate); }
+  .grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 0.9rem;
+  }
+  .card {
+    background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1rem; position: relative; overflow: hidden;
+  }
+  .card.elevated { background: var(--red-bg); border-color: #E2BBB4; }
+  .card .region { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; font-weight: 600; }
+  .card .value { font-size: 2rem; font-weight: 700; margin: 0.25rem 0; }
+  .card.elevated .value { color: var(--red); }
+  .card:not(.elevated) .value { color: var(--green); }
+  .card .unit { font-size: 0.8rem; color: var(--muted); font-weight: 400; }
+  .badge {
+    display: inline-block; font-size: 0.72rem; font-weight: 700; padding: 0.15rem 0.5rem;
+    border-radius: 999px; margin-top: 0.3rem;
+  }
+  .badge.elevated { background: var(--red); color: #fff; }
+  .badge.normal { background: var(--green-bg); color: var(--green); }
+  .card .model { font-size: 0.72rem; color: var(--muted); margin-top: 0.5rem; }
+  .skeleton { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  footer { text-align: center; color: var(--muted); font-size: 0.78rem; padding: 1.5rem; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>HazeCast SG</h1>
+    <div class="sub">Hourly PM2.5 forecast by region</div>
+  </div>
+  <div class="status-bar">
+    <span id="healthStatus"><span class="dot pending"></span>checking API…</span>
+    <span id="thresholdStatus"></span>
+    <button id="refreshBtn" onclick="loadAll()">Refresh</button>
+  </div>
+</header>
+
+<main>
+  <div id="banner" class="banner"></div>
+
+  <div class="meta-row">
+    <span>As of: <strong id="asOfTime">—</strong></span>
+    <span>Feature age: <strong id="featureAge">—</strong></span>
+    <span>Last scored: <strong id="scoredAt">—</strong></span>
+  </div>
+
+  <div class="horizon-tabs" id="horizonTabs">
+    <button data-h="6" class="active">+6h</button>
+    <button data-h="12">+12h</button>
+    <button data-h="24">+24h</button>
+  </div>
+
+  <div class="grid" id="grid">
+    <!-- cards injected here -->
+  </div>
+</main>
+
+<footer>Calls GET /forecast, /config and /health on this same FastAPI server. Auto-refreshes every 60s.</footer>
+
+<script>
+  const REGION_ORDER = ["north", "south", "east", "west", "central", "national"];
+  let forecastData = [];
+  let threshold = null;
+  let activeHorizon = 6;
+
+  function fmtTime(iso) {
+    if (!iso) return "—";
+    try {
+      const d = new Date(iso);
+      return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch (e) { return iso; }
+  }
+
+  function showBanner(kind, text) {
+    const el = document.getElementById("banner");
+    el.className = "banner show " + kind;
+    el.textContent = text;
+  }
+  function hideBanner() {
+    document.getElementById("banner").className = "banner";
+  }
+
+  async function loadHealth() {
+    const el = document.getElementById("healthStatus");
+    try {
+      const res = await fetch("/health");
+      if (!res.ok) throw new Error();
+      el.innerHTML = '<span class="dot ok"></span>API healthy';
+    } catch (e) {
+      el.innerHTML = '<span class="dot bad"></span>API unreachable';
+    }
+  }
+
+  async function loadConfig() {
+    try {
+      const res = await fetch("/config");
+      if (!res.ok) throw new Error();
+      const cfg = await res.json();
+      threshold = cfg.elevated_threshold_ug_m3;
+      document.getElementById("thresholdStatus").textContent =
+        "Elevated ≥ " + threshold + " µg/m³";
+    } catch (e) {
+      document.getElementById("thresholdStatus").textContent = "";
+    }
+  }
+
+  async function loadForecast() {
+    const grid = document.getElementById("grid");
+    grid.innerHTML = Array(6).fill('<div class="card skeleton"><div class="region">&nbsp;</div><div class="value">—</div></div>').join("");
+    try {
+      const res = await fetch("/forecast");
+      if (res.status === 503) {
+        const body = await res.json();
+        showBanner("warn", body.detail || "No forecast available yet.");
+        grid.innerHTML = "";
+        return;
+      }
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      forecastData = await res.json();
+      hideBanner();
+      renderMeta();
+      renderGrid();
+    } catch (e) {
+      showBanner("error", "Could not load forecast: " + e.message);
+      grid.innerHTML = "";
+    }
+  }
+
+  function renderMeta() {
+    if (!forecastData.length) return;
+    const row = forecastData.find(r => r.horizon_hours === activeHorizon) || forecastData[0];
+    document.getElementById("asOfTime").textContent = fmtTime(row.as_of_time);
+    document.getElementById("scoredAt").textContent = fmtTime(row.scored_at);
+    const age = row.feature_age_hours;
+    const ageEl = document.getElementById("featureAge");
+    ageEl.textContent = (age != null ? age.toFixed(1) + "h" : "—");
+    ageEl.style.color = (age != null && age > 1) ? "#B85042" : "";
+    if (age != null && age > 1) {
+      showBanner("warn", "Features are " + age.toFixed(1) + "h old — upstream fire/weather data hasn't refreshed recently. Forecast is still the model's best available output.");
+    }
+  }
+
+  function renderGrid() {
+    const grid = document.getElementById("grid");
+    const rows = forecastData
+      .filter(r => r.horizon_hours === activeHorizon)
+      .sort((a, b) => REGION_ORDER.indexOf(a.region) - REGION_ORDER.indexOf(b.region));
+    grid.innerHTML = rows.map(r => `
+      <div class="card ${r.elevated_flag ? "elevated" : ""}">
+        <div class="region">${r.region}</div>
+        <div class="value">${r.forecast_pm25}<span class="unit"> µg/m³</span></div>
+        <span class="badge ${r.elevated_flag ? "elevated" : "normal"}">${r.elevated_flag ? "Elevated" : "Normal"}</span>
+        <div class="model">${r.model} · forecast for ${fmtTime(r.forecast_time)}</div>
+      </div>
+    `).join("");
+  }
+
+  document.getElementById("horizonTabs").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-h]");
+    if (!btn) return;
+    activeHorizon = Number(btn.dataset.h);
+    document.querySelectorAll("#horizonTabs button").forEach(b => b.classList.toggle("active", b === btn));
+    renderMeta();
+    renderGrid();
+  });
+
+  async function loadAll() {
+    await Promise.all([loadHealth(), loadConfig(), loadForecast()]);
+  }
+
+  loadAll();
+  setInterval(loadAll, 60000);
+</script>
+</body>
+</html>
