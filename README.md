@@ -181,6 +181,56 @@ MLOps is the goal here, not a leaderboard score. Both `linreg` and
 document whichever is shipped, and the recall numbers behind it, in the
 final report.
 
+## Hourly XGBoost: LOSO-tuned quantile alpha (`XGB_Tuned` branch)
+
+This branch adapts the hourly pipeline Dev built (`hourly_model.py`'s
+six-candidate comparison: persistence, ridge, random_forest, xgboost,
+lightgbm, xgboost_q85) by adding leave-one-haze-season-out (LOSO) tuning
+for `xgboost_q85`'s `quantile_alpha`, which previously used a single flat
+value (`config.XGB_QUANTILE_ALPHA = 0.85`) for every region and horizon.
+
+**Why.** Model *selection* in `hourly_model.py` already uses rigorous
+purged forward-CV across the six candidates. But `xgboost_q85`'s alpha
+itself was never separately tuned against haze conditions -- it just used
+the flat default. The ordinary forward-CV folds under-sample real haze
+events (most calendar months are calm, so a chronological fold has a real
+chance of containing none), so a hyperparameter selected against them can
+look fine in validation and still miss an actual haze episode. The
+existing linear quantile model (`HOURLY_TUNED_SETTINGS`) was already tuned
+with LOSO against full calendar years 2015 and 2019 for exactly this
+reason; this branch applies the same discipline to `xgboost_q85`'s alpha.
+
+**What changed.**
+- `src/hazecast/config.py` -- added `XGB_QUANTILE_ALPHA_TUNED`, a per-
+  (region, horizon) alpha dict selected via LOSO (fit on all years except
+  2015, score only on 2015; fit on all years except 2019, score only on
+  2019; keep an alpha only if it clears the project's dual bar --
+  `recall_elevated >= 1.15x persistence` AND `mae_elevated <= 1.15x
+  persistence` -- on **both** held-out seasons independently, not pooled).
+  Falls back to the flat `XGB_QUANTILE_ALPHA` for any cell not listed.
+- `src/hazecast/hourly_model.py` -- `_fit()` now special-cases
+  `xgboost_q85` to pull its alpha from `XGB_QUANTILE_ALPHA_TUNED` per
+  (target, horizon) instead of the flat default. Model *selection* itself
+  (which of the six candidates wins each cell) is untouched.
+- `experiments/xgb_loso_alpha_tuning.py` -- the LOSO sweep that produced
+  the table above; reruns cleanly from `data/gold/hourly_features.parquet`
+  and should reproduce the same recommended alphas.
+- `experiments/compare_model1_vs_model2.py` -- side-by-side comparison of
+  Model 1 (untuned, flat alpha=0.85) vs Model 2 (LOSO-tuned), both scored
+  once on the untouched `final_test` holdout. Output in
+  `reports/model_comparison/model1_vs_model2_final_test.csv`.
+
+**Result, on `final_test` (nothing here is tuned against it):** Model 2
+has higher recall than Model 1 in 15/18 (region, horizon) cells, lower
+elevated-MAE in 11/18, and passes the project's dual bar in 8/18 cells
+vs. Model 1's 5/18.
+
+**Known gap.** Two cells (`west`, h=6 and `central`, h=24) never cleared
+both LOSO folds during tuning; their listed alpha is the best worst-case
+recall margin, not a confirmed pass -- flagged in `config.py`'s docstring,
+not silently treated as a pass.
+
+
 ## Running it
 
 **1. Get the data** -- see [`data/README.md`](data/README.md).

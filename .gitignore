@@ -8,6 +8,10 @@ data/gold/**/*.parquet
 data/models/*
 !data/models/.gitkeep
 !data/*/.gitkeep
+# hourly champion models + selection/comparison artifacts -- explicitly
+# tracked for team review (small: ~18MB), not regenerated per-push
+!data/models/hourly/
+!data/models/hourly/**
 
 # python
 __pycache__/
@@ -39,3 +43,6 @@ airflow.cfg
 
 # live downloads (re-fetched with python -m hazecast.refresh)
 data/raw/**/*live*.csv
+
+# session scratch -- not for review
+_tmp_validation/

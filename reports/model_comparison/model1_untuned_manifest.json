@@ -1,0 +1,579 @@
+{
+  "schema_version": 1,
+  "pipeline": "hourly",
+  "horizons_hours": [
+    6,
+    12,
+    24
+  ],
+  "timezone": "Asia/Singapore",
+  "feature_columns": [
+    "fire_sumatra_lag0",
+    "fire_sumatra_lag2",
+    "fire_sumatra_lag3",
+    "fire_sumatra_roll3",
+    "fire_kalimantan_lag0",
+    "fire_kalimantan_lag2",
+    "fire_kalimantan_lag3",
+    "fire_kalimantan_roll3",
+    "fire_data_gap_recent",
+    "wind_speed_singapore",
+    "rain_singapore_mm",
+    "rain_singapore_roll3h",
+    "rain_singapore_roll24h",
+    "wind_speed_riau",
+    "rain_riau_mm",
+    "rain_riau_roll24h",
+    "wind_speed_palembang",
+    "rain_palembang_mm",
+    "rain_palembang_roll3h",
+    "rain_palembang_roll24h",
+    "wind_speed_pontianak",
+    "rain_pontianak_mm",
+    "rain_pontianak_roll3h",
+    "rain_pontianak_roll24h",
+    "wind_speed_palangka",
+    "rain_palangka_mm",
+    "rain_palangka_roll3h",
+    "rain_palangka_roll24h",
+    "upwind_sumatra",
+    "upwind_kalimantan",
+    "now_north",
+    "now_south",
+    "now_east",
+    "now_west",
+    "now_central",
+    "now_national"
+  ],
+  "threshold": 56.0,
+  "models": {
+    "6": {
+      "north": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 9.088220207801436,
+          "rmse": 10.520977271106535,
+          "f2": 0.4948586118251928,
+          "tp": 77,
+          "fp": 169,
+          "fn": 56,
+          "n_test": 66004,
+          "n_elevated": 133
+        },
+        "final_test": {
+          "mae": 8.798508136925625,
+          "rmse": 10.861166711782294,
+          "f2": 0.7769181173436492,
+          "tp": 241,
+          "fp": 166,
+          "fn": 45,
+          "n_test": 21955,
+          "n_elevated": 286
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "north_h6_715cd5ad1a9a48d0be636021df862195.joblib",
+        "run_id": "715cd5ad1a9a48d0be636021df862195",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T05:00:00+08:00"
+      },
+      "south": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 9.269534529545012,
+          "rmse": 10.73793665535042,
+          "f2": 0.5432196669310071,
+          "tp": 137,
+          "fp": 136,
+          "fn": 110,
+          "n_test": 66004,
+          "n_elevated": 247
+        },
+        "final_test": {
+          "mae": 9.87438140053381,
+          "rmse": 12.10788186770899,
+          "f2": 0.783499446290144,
+          "tp": 283,
+          "fp": 255,
+          "fn": 34,
+          "n_test": 21955,
+          "n_elevated": 317
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "south_h6_9dc7159270724c18917953c66a1812a5.joblib",
+        "run_id": "9dc7159270724c18917953c66a1812a5",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T05:00:00+08:00"
+      },
+      "east": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 8.048984465241599,
+          "rmse": 9.532215584731286,
+          "f2": 0.5241090146750524,
+          "tp": 100,
+          "fp": 122,
+          "fn": 83,
+          "n_test": 66004,
+          "n_elevated": 183
+        },
+        "final_test": {
+          "mae": 8.301119162503692,
+          "rmse": 10.39735354972128,
+          "f2": 0.7988029465930019,
+          "tp": 347,
+          "fp": 137,
+          "fn": 75,
+          "n_test": 21955,
+          "n_elevated": 422
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "east_h6_8ae4fce36714428eaa475db2919a12b8.joblib",
+        "run_id": "8ae4fce36714428eaa475db2919a12b8",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T05:00:00+08:00"
+      },
+      "west": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 9.218732594649046,
+          "rmse": 10.636935342551302,
+          "f2": 0.6524249422632794,
+          "tp": 113,
+          "fp": 173,
+          "fn": 32,
+          "n_test": 66004,
+          "n_elevated": 145
+        },
+        "final_test": {
+          "mae": 7.061278502921041,
+          "rmse": 9.652982302127882,
+          "f2": 0.8102253032928943,
+          "tp": 374,
+          "fp": 122,
+          "fn": 79,
+          "n_test": 21955,
+          "n_elevated": 453
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "west_h6_497e78b74b0243b3951a48cd0231e87d.joblib",
+        "run_id": "497e78b74b0243b3951a48cd0231e87d",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T05:00:00+08:00"
+      },
+      "central": {
+        "model": "persistence",
+        "validation": {
+          "mae": 5.705275437852252,
+          "rmse": 7.85306571812959,
+          "f2": 0.46206896551724136,
+          "tp": 67,
+          "fp": 78,
+          "fn": 78,
+          "n_test": 66004,
+          "n_elevated": 145
+        },
+        "final_test": {
+          "mae": 7.022910498747438,
+          "rmse": 10.550711497096628,
+          "f2": 0.745932848736587,
+          "tp": 431,
+          "fp": 142,
+          "fn": 148,
+          "n_test": 21955,
+          "n_elevated": 579
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": null,
+        "run_id": "8bdebcedb2c84df78a09ad43d5a865dd",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T05:00:00+08:00"
+      },
+      "national": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 6.414000899103525,
+          "rmse": 7.651771291775416,
+          "f2": 0.6564245810055865,
+          "tp": 94,
+          "fp": 114,
+          "fn": 33,
+          "n_test": 66004,
+          "n_elevated": 127
+        },
+        "final_test": {
+          "mae": 6.062953891341493,
+          "rmse": 8.15231620540641,
+          "f2": 0.8367139959432048,
+          "tp": 330,
+          "fp": 102,
+          "fn": 55,
+          "n_test": 21955,
+          "n_elevated": 385
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "national_h6_f4fb2edf20974493811c1aeca1d6e644.joblib",
+        "run_id": "f4fb2edf20974493811c1aeca1d6e644",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T05:00:00+08:00"
+      }
+    },
+    "12": {
+      "north": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 10.09523619406151,
+          "rmse": 11.592685846190246,
+          "f2": 0.509090909090909,
+          "tp": 84,
+          "fp": 209,
+          "fn": 49,
+          "n_test": 66000,
+          "n_elevated": 133
+        },
+        "final_test": {
+          "mae": 9.362503441089759,
+          "rmse": 11.904985612726668,
+          "f2": 0.6416054267947994,
+          "tp": 227,
+          "fp": 374,
+          "fn": 65,
+          "n_test": 21955,
+          "n_elevated": 292
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "north_h12_6121b9483fc048b4ad5293d96d7ebbfb.joblib",
+        "run_id": "6121b9483fc048b4ad5293d96d7ebbfb",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T11:00:00+08:00"
+      },
+      "south": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 10.030467710812886,
+          "rmse": 11.619660983131809,
+          "f2": 0.5263157894736842,
+          "tp": 140,
+          "fp": 202,
+          "fn": 107,
+          "n_test": 66000,
+          "n_elevated": 247
+        },
+        "final_test": {
+          "mae": 10.55493270723729,
+          "rmse": 13.620309933724313,
+          "f2": 0.6059850374064838,
+          "tp": 243,
+          "fp": 470,
+          "fn": 80,
+          "n_test": 21955,
+          "n_elevated": 323
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "south_h12_7f2c2184e426467bab848c1568d7edf7.joblib",
+        "run_id": "7f2c2184e426467bab848c1568d7edf7",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T11:00:00+08:00"
+      },
+      "east": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 8.763424935861067,
+          "rmse": 10.245328259432195,
+          "f2": 0.5231388329979879,
+          "tp": 104,
+          "fp": 158,
+          "fn": 79,
+          "n_test": 66000,
+          "n_elevated": 183
+        },
+        "final_test": {
+          "mae": 8.995733528423896,
+          "rmse": 11.554215056674964,
+          "f2": 0.6524604569420035,
+          "tp": 297,
+          "fp": 267,
+          "fn": 131,
+          "n_test": 21955,
+          "n_elevated": 428
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "east_h12_bcc139c4ec1647e7acd0796adc95cf5f.joblib",
+        "run_id": "bcc139c4ec1647e7acd0796adc95cf5f",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T11:00:00+08:00"
+      },
+      "west": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 10.091268262111779,
+          "rmse": 11.598943809948132,
+          "f2": 0.5903866248693835,
+          "tp": 113,
+          "fp": 264,
+          "fn": 32,
+          "n_test": 66000,
+          "n_elevated": 145
+        },
+        "final_test": {
+          "mae": 8.063553786055152,
+          "rmse": 12.023005121566941,
+          "f2": 0.6527669524551831,
+          "tp": 335,
+          "fp": 395,
+          "fn": 124,
+          "n_test": 21955,
+          "n_elevated": 459
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "west_h12_b7bf2fd33c364c87be818116284e3739.joblib",
+        "run_id": "b7bf2fd33c364c87be818116284e3739",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T11:00:00+08:00"
+      },
+      "central": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 8.430674633257317,
+          "rmse": 9.917357629174331,
+          "f2": 0.43202764976958524,
+          "tp": 75,
+          "fp": 213,
+          "fn": 70,
+          "n_test": 66000,
+          "n_elevated": 145
+        },
+        "final_test": {
+          "mae": 8.56081771737648,
+          "rmse": 12.499011865279282,
+          "f2": 0.5471177079737659,
+          "tp": 317,
+          "fp": 240,
+          "fn": 268,
+          "n_test": 21955,
+          "n_elevated": 585
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "central_h12_3d4ee2ef0f394ba99c37b766277ff659.joblib",
+        "run_id": "3d4ee2ef0f394ba99c37b766277ff659",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T11:00:00+08:00"
+      },
+      "national": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 7.340007894625808,
+          "rmse": 8.663012924380434,
+          "f2": 0.607940446650124,
+          "tp": 98,
+          "fp": 200,
+          "fn": 29,
+          "n_test": 66000,
+          "n_elevated": 127
+        },
+        "final_test": {
+          "mae": 6.884797036577754,
+          "rmse": 9.720320577662164,
+          "f2": 0.647801683816651,
+          "tp": 277,
+          "fp": 297,
+          "fn": 114,
+          "n_test": 21955,
+          "n_elevated": 391
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "national_h12_97152b0e3215485c90e5a882e6616bac.joblib",
+        "run_id": "97152b0e3215485c90e5a882e6616bac",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T11:00:00+08:00"
+      }
+    },
+    "24": {
+      "north": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 9.935910523845514,
+          "rmse": 11.415235997692534,
+          "f2": 0.5068337129840547,
+          "tp": 89,
+          "fp": 257,
+          "fn": 44,
+          "n_test": 65991,
+          "n_elevated": 133
+        },
+        "final_test": {
+          "mae": 9.053960887437203,
+          "rmse": 11.712351465100914,
+          "f2": 0.5011587485515643,
+          "tp": 173,
+          "fp": 341,
+          "fn": 130,
+          "n_test": 21955,
+          "n_elevated": 303
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "north_h24_a84e5c624972401cbf4781f93f48e263.joblib",
+        "run_id": "a84e5c624972401cbf4781f93f48e263",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T23:00:00+08:00"
+      },
+      "south": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 9.984671900950184,
+          "rmse": 11.535006311779279,
+          "f2": 0.5327868852459017,
+          "tp": 143,
+          "fp": 211,
+          "fn": 104,
+          "n_test": 65991,
+          "n_elevated": 247
+        },
+        "final_test": {
+          "mae": 10.414062576320008,
+          "rmse": 14.510690086654744,
+          "f2": 0.5950048971596474,
+          "tp": 243,
+          "fp": 459,
+          "fn": 92,
+          "n_test": 21955,
+          "n_elevated": 335
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "south_h24_674f43991a1d4a5581f69c7dbdb9fe09.joblib",
+        "run_id": "674f43991a1d4a5581f69c7dbdb9fe09",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T23:00:00+08:00"
+      },
+      "east": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 8.882217227969145,
+          "rmse": 10.398093814244696,
+          "f2": 0.5087209302325582,
+          "tp": 105,
+          "fp": 195,
+          "fn": 78,
+          "n_test": 65991,
+          "n_elevated": 183
+        },
+        "final_test": {
+          "mae": 9.30968594165577,
+          "rmse": 12.908303187763371,
+          "f2": 0.5366991938905388,
+          "tp": 253,
+          "fp": 344,
+          "fn": 187,
+          "n_test": 21955,
+          "n_elevated": 440
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "east_h24_20fc2cf3ce564e42ab3ac68cf6e5f5c4.joblib",
+        "run_id": "20fc2cf3ce564e42ab3ac68cf6e5f5c4",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T23:00:00+08:00"
+      },
+      "west": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 10.181732837261201,
+          "rmse": 11.637494808644794,
+          "f2": 0.6352683461117196,
+          "tp": 116,
+          "fp": 217,
+          "fn": 29,
+          "n_test": 65991,
+          "n_elevated": 145
+        },
+        "final_test": {
+          "mae": 8.39538711429701,
+          "rmse": 13.003886917622243,
+          "f2": 0.6153250773993808,
+          "tp": 318,
+          "fp": 382,
+          "fn": 153,
+          "n_test": 21955,
+          "n_elevated": 471
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "west_h24_9494b2196cac4b3481852df2dbdcaba4.joblib",
+        "run_id": "9494b2196cac4b3481852df2dbdcaba4",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T23:00:00+08:00"
+      },
+      "central": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 8.583401161730059,
+          "rmse": 10.04873156650465,
+          "f2": 0.49065420560747663,
+          "tp": 84,
+          "fp": 192,
+          "fn": 61,
+          "n_test": 65991,
+          "n_elevated": 145
+        },
+        "final_test": {
+          "mae": 8.892281941166502,
+          "rmse": 13.566345918653253,
+          "f2": 0.3804725503822099,
+          "tp": 219,
+          "fp": 271,
+          "fn": 378,
+          "n_test": 21955,
+          "n_elevated": 597
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "central_h24_b8764d4abd0d4d45a4964fa0e0eca3fd.joblib",
+        "run_id": "b8764d4abd0d4d45a4964fa0e0eca3fd",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T23:00:00+08:00"
+      },
+      "national": {
+        "model": "xgboost_q85",
+        "validation": {
+          "mae": 7.472303510795004,
+          "rmse": 8.763277831578257,
+          "f2": 0.6658446362515413,
+          "tp": 108,
+          "fp": 195,
+          "fn": 19,
+          "n_test": 65991,
+          "n_elevated": 127
+        },
+        "final_test": {
+          "mae": 7.218829433664432,
+          "rmse": 11.119563300074446,
+          "f2": 0.45325779036827196,
+          "tp": 192,
+          "fp": 314,
+          "fn": 211,
+          "n_test": 21955,
+          "n_elevated": 403
+        },
+        "selection_rule": "f2_then_mae_rmse",
+        "test_start": "2024-04-15T05:00:00+08:00",
+        "artifact": "national_h24_fed5679ec69042bab96dd43c75c902f2.joblib",
+        "run_id": "fed5679ec69042bab96dd43c75c902f2",
+        "training_end": "2026-10-16T23:00:00+08:00",
+        "training_label_end": "2026-10-17T23:00:00+08:00"
+      }
+    }
+  }
+}

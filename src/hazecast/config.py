@@ -179,6 +179,38 @@ XGB_PARAMS = dict(
 # of more false alarms; 0.70-0.95 were swept, 0.85 was the best balance.
 XGB_QUANTILE_ALPHA = 0.85
 
+# Per-cell tuned alpha for the xgboost_q85 candidate in the hourly
+# comparison, selected via leave-one-haze-season-out (2015, 2019 -- the
+# same methodology HOURLY_TUNED_SETTINGS above uses for the linear
+# quantile model). For each candidate alpha, two models are fit: one
+# trained on everything except 2015 and scored only on 2015, one trained
+# on everything except 2019 and scored only on 2019. An alpha is only
+# kept if it clears the dual bar (recall >=1.15x persistence AND
+# mae_elevated <=1.15x persistence) on BOTH held-out seasons
+# independently -- not pooled, not averaged. Among alphas that clear
+# both, highest average F2 wins. The ordinary forward-CV folds used
+# elsewhere in this file under-sample real haze events (most calendar
+# months are calm), so this is a stricter, season-aware check run only
+# for this one hyperparameter.
+#
+# Checked once against the untouched final_test holdout (2024-04-15
+# onward) as confirmation, not selection: dual-bar pass rate rose from
+# 5/15 to 9/15 cells vs. the prior flat/forward-CV-tuned alpha. Falls
+# back to XGB_QUANTILE_ALPHA above for any (target, horizon) not listed.
+#
+# Known open gap: west/h=6 and central/h=24 -- no alpha cleared both
+# LOSO folds; the value below is the best worst-case recall margin, not
+# a confirmed pass. Same "accepted near-ceiling, not silently treated as
+# a pass" status as the linreg gaps noted above.
+XGB_QUANTILE_ALPHA_TUNED: dict[tuple[str, int], float] = {
+    ("north", 6): 0.90, ("north", 12): 0.90, ("north", 24): 0.95,
+    ("south", 6): 0.90, ("south", 12): 0.85, ("south", 24): 0.95,
+    ("east", 6): 0.95, ("east", 12): 0.95, ("east", 24): 0.95,
+    ("west", 6): 0.95, ("west", 12): 0.85, ("west", 24): 0.90,  # h=6, h=24: best worst-case, not a confirmed pass
+    ("central", 6): 0.95, ("central", 12): 0.95, ("central", 24): 0.90,  # h=24: best worst-case, not a confirmed pass
+    ("national", 6): 0.90, ("national", 12): 0.90, ("national", 24): 0.95,
+}
+
 # Daily model comparison. Existing hourly constants above are preserved.
 # All six candidates are enabled. Set this flag False for the five-model
 # comparison without quantile XGBoost. Restart notebook kernels after edits.
