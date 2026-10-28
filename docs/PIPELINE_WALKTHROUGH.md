@@ -391,6 +391,26 @@ the validation folds contain no elevated hour, rank by MAE then RMSE.
 Pooled F2 is computed over all folds together (not averaged), so that
 quiet folds don't dilute the haze evidence.
 
+**Stability rule (added 28 Oct).** A winner other than `xgboost_q85` is kept only if it beats
+`xgboost_q85` in at least **90 %** of paired block-bootstrap resamples of the pooled validation
+predictions. Whole weeks are resampled, so haze episodes stay intact; ~130–150 elevated hours per
+group make small F2 differences noise.
+- **Why:** twice, a thin validation win switched the west region (ridge at +6 h by +0.002; random
+  forest at +12 h by +0.038) and lost out of time (F2 −0.151 and −0.104).
+- **The bootstrap on those cases:** the random forest's edge held in only 73 % of resamples, and
+  persistence's edge at central +6 h in 43 %.
+- **Why not a fixed margin:** a fixed 0.03 F2 margin would have kept the west +12 h switch and
+  undone the central one, which is fitting a threshold to three examples.
+- **Known cost:** central +6 h goes back to `xgboost_q85` although persistence did better there on
+  the holdout. The holdout cannot be used to choose models without becoming a second validation set.
+
+Each manifest entry records the decision (`stability`: proposed model, confidence, model kept).
+
+**First retrain with the rule (28 Oct, Airflow).** Validation again proposed persistence at central
++6 h (54 % of resamples) and the random forest at west +12 h (71 %). Both reverted, so all 18 groups
+kept `xgboost_q85`. The gate passed with no F2 change in any of the 18 like-for-like groups and
+promoted the challenger. No forced promotion was needed.
+
 ![Pooled validation scores](img/candidates.png)
 
 What the real run selected: **`xgboost_q85` in all 18 groups.** It has
@@ -431,9 +451,9 @@ replays its holdout, and only then calls `governance.promote`:
 
 | Check | Rule | Why this rule (evidence) |
 |---|---|---|
-| Integrity | 18 entries; every artifact loads; finite prediction on the latest complete gold row | catches a broken or incomplete training run before it serves |
-| Skill | holdout F2 within **0.10** of persistence's in **≥ 50 %** of the groups with haze hours | aligned with the selection objective (F2). An earlier draft used MAE skill, which **would have rejected every model** (0 of 18 beat persistence on MAE, by design). Persistence is a floor, not a target, because it cannot forecast onset. The current champion: 15 of 18 within tolerance |
-| No regression | F2 within 0.05 of the champion's in ≥ half the groups; no group's F2 down by more than 0.10 (otherwise human review); MAE ≤ 2 × the champion's in every group | Judged on the selection objective. An earlier MAE-based version (≤ 1.10×) rejected the LOSO-tuned challenger, which had F2 better in 13/18 groups but deliberately higher forecasts (MAE up to 1.8×), and missed its one real regression (west +6 h, F2 −0.151), which the F2 rule flags |
+| Integrity | 18 entries; every artifact loads; finite prediction on the latest complete gold row; **no artifact needs an undeclared module** (`dill`) | catches a broken or incomplete training run before it serves. The module check was added after a retrain inside Airflow wrote models that only loaded where `dill` was installed (28 Oct); models are now saved with the standard pickler |
+| Skill | holdout F2 within **0.10** of persistence's in **≥ 50 %** of the groups with haze hours; also reports how many groups actually beat persistence (6 of 18 for the 28 Oct challenger) | aligned with the selection objective (F2). An earlier draft used MAE skill, which **would have rejected every model** (0 of 18 beat persistence on MAE, by design). Persistence is a floor, not a target, because it cannot forecast onset. The current champion: 15 of 18 within tolerance |
+| No regression | **Like-for-like:** the champion's model choices are refitted on the challenger's pre-holdout rows with current features and scored on the same holdout (recorded scores only when the holdout has no haze). F2 within 0.05 of the champion's in ≥ half the groups; no group's F2 down by more than 0.10 (otherwise human review); MAE ≤ 2 × the champion's in every group | Judged on the selection objective. An earlier MAE-based version (≤ 1.10×) rejected the LOSO-tuned challenger, which had F2 better in 13/18 groups but deliberately higher forecasts (MAE up to 1.8×), and missed its one real regression (west +6 h, F2 −0.151), which the F2 rule flags |
 
 On pass: artifacts are copied, the old manifest is archived to
 `history/`, and the new manifest is written **last** (atomic replace), so

@@ -100,16 +100,18 @@ automatically once its labels are in the development window.
 1. `train_challenger`: the full six-candidate comparison on all data, written to `data/models/hourly_staging/<run_id>/`. Production is untouched.
 2. `replay_holdout`: refits the selected models on pre-holdout data only and replays the holdout through every monitor (`hazecast.monitor_backtest`). This produces honest holdout predictions and the replay dashboard reviewers use.
 3. `promote` (`hazecast.governance`); **all** must pass:
-   - **Integrity:** 18 entries, every artifact loads and gives a finite prediction on the latest gold row.
+   - **Integrity:** 18 entries, every artifact loads and gives a finite prediction on the latest gold row, and no artifact needs a module outside the declared requirements (added 28 Oct, after Airflow wrote `dill`-dependent model files).
    - **Skill:** holdout **F2** within 0.10 of persistence's in ≥ 50 % of the groups with haze hours. F2, not MAE: the q85 models never beat persistence on MAE (0 of 18 groups), so an MAE gate would reject every model. Persistence is a floor, not a target, because it cannot forecast the onset of an episode. Current champion: 15 of 18 within tolerance.
-   - **No regression, judged on F2:**
+   - **No regression, judged on F2, like-for-like:** the champion's model choices are refitted on the challenger's own pre-holdout rows with the current features and scored on the same holdout. The champion's recorded scores came from another window and, after the fire-feature fix, from leaky features, which made an unchanged model look 15/18 better; like-for-like it matched the champion exactly wherever both chose `xgboost_q85`.
      - F2 within 0.05 of the champion's in at least half the groups.
      - **No single group's F2 falling by more than 0.10.** If one does, the challenger is held for a person to decide (`--force` with a recorded reason), not promoted automatically.
      - MAE at most 2× the champion's in every group, as a blow-up guard.
      The first version of this check used MAE (within 10%). Evaluating the LOSO-tuned model from the `XGB_Tuned` branch showed why that was wrong: it improved F2 in 13 of 18 groups, but a higher quantile forecasts higher by design (MAE up to 1.8×), so the MAE rule rejected it. It also did not single out the one genuine regression (west +6 h, F2 0.779 → 0.628). The F2 rule passes the broad improvement and flags exactly that group.
 4. **Pass:** artifacts are copied, the old manifest is archived to `history/`, and the new manifest is written **last**, so inference never sees a half-published model. The monitoring baseline (including the calibrated limits) is rebuilt for the new champion. **Fail:** the champion keeps serving, and the rejection and its reasons go to `promotion_log.jsonl`.
 5. **Rollback** (any time, one command, no retraining): `python -m hazecast.governance rollback` restores the previous manifest. Artifacts are never deleted, so any archived version can be restored with `--to`.
-6. **Manual override:** `python -m hazecast.governance promote --candidate <dir> --force` promotes despite a failed gate. Only the ML owner may use it, and the reason must be written in the log entry and the team channel.
+6. **Manual override:** `python -m hazecast.governance promote --candidate <dir> --force --reason "..."` promotes despite a failed gate. The command refuses without a reason, and stores it in `promotion_log.jsonl` and in the published manifest (`forced_reason`, `forced_over`). Only the ML owner may use it, and the team channel should be told.
+7. **Model selection stability:** a candidate other than `xgboost_q85` must beat it in ≥ 90 % of paired weekly bootstrap resamples of the validation predictions (walkthrough §3.5). This prevents promotion holds caused by switches on thin, noisy margins.
+8. **Reproducibility:** train, gate and replay in the same environment (the Airflow image). On 28 Oct the same model scored F2 0.759 with xgboost 3.2.0 (Airflow) and 0.790 with 3.4.1 (a local environment), because the requirements are lower bounds only. Pinning exact versions is recommended.
 
 **Optional shadow period** (recommended before the first haze season in
 production): rather than promoting at step 4, run inference for the
