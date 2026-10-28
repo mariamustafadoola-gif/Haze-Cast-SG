@@ -1,0 +1,19 @@
+target,horizon,recommended_alpha,avg_f2,status
+central,6,0.95,0.701,pass both folds
+east,6,0.95,0.715,pass both folds
+national,6,0.95,0.756,pass both folds
+north,6,0.95,0.713,pass both folds
+south,6,0.9,0.765,pass both folds
+west,6,0.9,0.758,pass both folds
+central,12,0.95,0.676,pass both folds
+east,12,0.95,0.691,pass both folds
+national,12,0.95,0.729,pass both folds
+north,12,0.95,0.672,pass both folds
+south,12,0.95,0.733,pass both folds
+west,12,0.9,0.722,pass both folds
+central,24,0.95,0.608,pass both folds
+east,24,0.95,0.622,pass both folds
+national,24,0.95,0.634,NO ALPHA PASSES BOTH FOLDS -- best worst-case shown
+north,24,0.95,0.635,pass both folds
+south,24,0.95,0.715,pass both folds
+west,24,0.95,0.686,pass both folds

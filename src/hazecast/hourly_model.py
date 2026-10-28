@@ -14,8 +14,10 @@ import joblib
 import mlflow
 import numpy as np
 import pandas as pd
+from xgboost import XGBRegressor
 from hazecast.config import (
     USE_SELECTED_FEATURES, SELECTED_FEATURES_HOURLY,
+    XGB_PARAMS, XGB_QUANTILE_ALPHA, XGB_QUANTILE_ALPHA_TUNED,
     GOLD_DIR, MODELS_DIR, SG_REGIONS, HOURLY_HORIZONS, HOURLY_TIMEZONE,
     PM25_ELEVATED_THRESHOLD, MODEL_CANDIDATES, CV_SPLITS,
     FINAL_TEST_FRACTION, MIN_TRAIN_ROWS, HOURLY_MLFLOW_EXPERIMENT, REPO_ROOT,
@@ -88,8 +90,21 @@ def _before(rows, boundary, horizon):
     return rows.loc[rows.date + pd.Timedelta(hours=horizon) < boundary]
 
 
-def _fit(name, rows, cols, target):
-    model = _make_model(name)
+def _xgb_q85_alpha(target, horizon):
+    """Per-cell LOSO-tuned alpha (see config.XGB_QUANTILE_ALPHA_TUNED),
+    falling back to the flat default for any (target, horizon) not tuned.
+    """
+    return XGB_QUANTILE_ALPHA_TUNED.get((target, horizon), XGB_QUANTILE_ALPHA)
+
+
+def _fit(name, rows, cols, target, horizon):
+    if name == "xgboost_q85":
+        # Hourly-specific: per-cell tuned alpha, not the flat default
+        # hazecast.train._make_model builds for the daily comparison.
+        model = XGBRegressor(**{**XGB_PARAMS, "objective": "reg:quantileerror",
+                               "quantile_alpha": _xgb_q85_alpha(target, horizon)})
+    else:
+        model = _make_model(name)
     if model is not None:
         model.fit(rows[cols], rows[f"label_{target}"])
     return model
@@ -142,7 +157,7 @@ def _evaluate(gold, horizon):
                 raise ValueError(f"{target}: insufficient rows in validation fold {fold}")
             for name in MODEL_CANDIDATES:
                 with mlflow.start_run(run_name=f"{target}_h{horizon}_{name}_cv{fold}"):
-                    model = _fit(name, train, cols, target)
+                    model = _fit(name, train, cols, target, horizon)
                     pred = _predict(model, valid, cols, target)
                     metrics = _metrics(valid[f"label_{target}"], pred)
                     params = dict(target=target, model=name, split="validation", fold=fold,
@@ -171,7 +186,7 @@ def _evaluate(gold, horizon):
         test = rows.loc[rows.date >= test_start]
         if len(train) < MIN_TRAIN_ROWS or test.empty:
             raise ValueError(f"{target}: insufficient training/final holdout rows")
-        selected = _fit(winner, train, cols, target)
+        selected = _fit(winner, train, cols, target, horizon)
         holdout = _metrics(test[f"label_{target}"], _predict(selected, test, cols, target))
         results.append(dict(target=target, model=winner, split="final_test", **holdout))
         selections[target] = dict(model=winner, validation=summaries[winner], final_test=holdout,
@@ -225,7 +240,7 @@ def train_final_hourly_models(gold, *, horizons=None, out_dir=None):
         manifest["models"][str(horizon)] = {}
         for target, selection in decisions[horizon].items():
             rows = _complete(labelled, cols, target, horizon)
-            model = _fit(selection["model"], rows, cols, target)
+            model = _fit(selection["model"], rows, cols, target, horizon)
             with mlflow.start_run(run_name=f"final_{target}_h{horizon}_{selection['model']}") as run:
                 mlflow.log_params(dict(target=target, model=selection["model"],
                     horizon_hours=horizon, n_train=len(rows), n_features=len(cols),
@@ -234,6 +249,7 @@ def train_final_hourly_models(gold, *, horizons=None, out_dir=None):
                     mlflow.log_metrics({f"{split}_{k}": v for k, v in selection[split].items()
                                         if np.isfinite(v)})
                 entry = dict(**selection, artifact=None, run_id=run.info.run_id,
+                    quantile_alpha=(_xgb_q85_alpha(target, horizon) if selection["model"] == "xgboost_q85" else None),
                     training_end=rows.date.max().isoformat(),
                     training_label_end=(rows.date.max() + pd.Timedelta(hours=horizon)).isoformat())
                 path = None

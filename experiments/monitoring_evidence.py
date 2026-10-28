@@ -145,8 +145,8 @@ def retrain_test(gold, manifest):
             test = rows.loc[rows.date >= SIGNAL]
             y = test[f"label_{t}"].to_numpy()
             el = y >= THR
-            for name, est in (("old model (data to Apr 2024)", _fit(e["model"], _before(rows, pd.Timestamp(e["test_start"]), h), cols, t)),
-                              ("retrained at signal", _fit(e["model"], _before(rows, SIGNAL, h), cols, t)),
+            for name, est in (("old model (data to Apr 2024)", _fit(e["model"], _before(rows, pd.Timestamp(e["test_start"]), h), cols, t, h)),
+                              ("retrained at signal", _fit(e["model"], _before(rows, SIGNAL, h), cols, t, h)),
                               ("persistence", None)):
                 p = _predict(est, test, cols, t)
                 rows_out.append(dict(h=h, target=t, model=name, mae=np.abs(p - y).mean(), n_elevated=int(el.sum()),

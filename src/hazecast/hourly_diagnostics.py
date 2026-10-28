@@ -58,7 +58,7 @@ def backtest_selected_models(
             test = rows.loc[rows.date >= boundary]
             if len(train) < MIN_TRAIN_ROWS or test.empty:
                 raise ValueError(f"Insufficient pre-test or final-test rows: {target}, h={horizon}")
-            estimator = _fit(entry["model"], train, cols, target)
+            estimator = _fit(entry["model"], train, cols, target, horizon)
             predicted = _predict(estimator, test, cols, target)
             if not np.isfinite(predicted).all():
                 raise ValueError("Nonfinite backtest predictions")

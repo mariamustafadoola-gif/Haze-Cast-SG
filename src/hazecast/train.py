@@ -78,9 +78,14 @@ def _metrics(y_true, y_pred, threshold=PM25_ELEVATED_THRESHOLD):
     # F2 = 5 TP / (5 TP + 4 FN + FP). No positive support is
     # explicitly undefined, so a quiet fold cannot win selection on F2.
     f2 = 5 * tp / (5 * tp + 4 * fn + fp) if actual.any() else float("nan")
+    # MAE restricted to truly-elevated rows only -- the actual metric the
+    # dual bar (see config.py) is defined on, not the overall "mae" above.
+    # Same formula as hourly_diagnostics.py's per-chart mae_elevated.
+    mae_elevated = float(np.abs(y[actual] - p[actual]).mean()) if actual.any() else float("nan")
     return dict(mae=float(mean_absolute_error(y, p)),
                 rmse=float(np.sqrt(mean_squared_error(y, p))), f2=f2,
-                tp=tp, fp=fp, fn=fn, n_test=len(y), n_elevated=int(actual.sum()))
+                tp=tp, fp=fp, fn=fn, n_test=len(y), n_elevated=int(actual.sum()),
+                mae_elevated=mae_elevated)
 
 
 def _make_model(name):

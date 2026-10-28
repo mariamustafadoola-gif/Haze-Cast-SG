@@ -59,7 +59,7 @@ def refit_pre_holdout(gold: pd.DataFrame, manifest: dict):
             train, test = _before(rows, boundary, horizon), rows.loc[rows.date >= boundary]
             if len(train) < MIN_TRAIN_ROWS or test.empty:
                 raise ValueError(f"Insufficient pre-test or final-test rows: {target}, h={horizon}")
-            est = _fit(entry["model"], train, cols, target)
+            est = _fit(entry["model"], train, cols, target, horizon)
             models[(target, int(horizon))] = (entry["model"], est)
             frames.append(pd.DataFrame(dict(
                 as_of_time=test.date.to_numpy(), forecast_time=(test.date + pd.Timedelta(hours=horizon)).to_numpy(),

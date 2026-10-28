@@ -203,6 +203,17 @@ MLOps is the goal here, not a leaderboard score. Both `linreg` and
 document whichever is shipped, and the recall numbers behind it, in the
 final report.
 
+## Which branch is this?
+
+| Branch | Model | Use it for |
+|---|---|---|
+| `e2e-pipeline` | six-candidate selection; `xgboost_q85` at a flat quantile of 0.85 | the baseline end-to-end pipeline |
+| **`e2e-pipeline-xgb-tuned`** (this branch) | same pipeline; `xgboost_q85` uses the LOSO-tuned quantile per region × horizon from `XGB_Tuned` (`config.XGB_QUANTILE_ALPHA_TUNED`) | the tuned model |
+
+Both branches have the same data pipeline, Airflow DAGs, monitoring, governance and dashboard.
+
+On the 2024–26 out-of-time holdout, the tuned model catches more haze hours than "PM2.5 stays the same" at every horizon (+6 / +12 / +24 h: 0.81 / 0.77 / 0.69 vs 0.77 / 0.71 / 0.65). The 0.85 model loses at +12 and +24 h. The costs are more false alarms (2.3–2.6% vs 1.6–1.7% at +12/24 h) and a regression in one group: west +6 h, where selection picks ridge. The promotion gate holds the model for human review because of that group. The per-cell alpha values themselves are not stable (4 of 18 reproduce on newer data); a single quantile of 0.90–0.95 gives a similar trade-off. Full evidence: `docs/PIPELINE_WALKTHROUGH.md` §3.10 and `reports/model_comparison/`.
+
 ## End-to-end pipeline
 
 **With Docker (recommended):**

@@ -443,6 +443,39 @@ Verified in headless Chrome: with live data (rounded values, notice shown for a 
 
 The API container now mounts `serving/` and `src/` like the Airflow containers, so dashboard or API edits apply on restart without rebuilding the image.
 
+### 3.10 Model on this branch: LOSO-tuned quantile alpha (from `XGB_Tuned`)
+
+> This section applies to the `e2e-pipeline-xgb-tuned` branch. `e2e-pipeline` keeps the flat α = 0.85.
+
+**What was taken from `XGB_Tuned`:**
+- **Unchanged:** the six-candidate forward-validated selection.
+- **Changed:** the `xgboost_q85` candidate's quantile α is now set per region × horizon (`config.XGB_QUANTILE_ALPHA_TUNED`) instead of a flat 0.85. Your teammate chose each α by leave-one-haze-season-out (LOSO): train without 2015 and score on 2015, train without 2019 and score on 2019, keep α values that clear the dual bar on both, then take the best average F2.
+- **Brought over as provenance:** `experiments/xgb_loso_alpha_tuning.py` and `compare_model1_vs_model2.py`.
+- **Not brought over:** model files, raw-data edits, and the README rewrite. Models are produced by `hazecast_retrain`, and raw data by the downloader.
+
+**Integration fixes:**
+- **Missing argument (a bug on `XGB_Tuned`):** `_fit()` gained a `horizon` argument, but `hourly_diagnostics.py` still called it without one, so the holdout diagnostics would have crashed. On this branch `monitor_backtest.py` and `experiments/monitoring_evidence.py` also call `_fit()`, so the replay and the monitoring baseline would otherwise have described a different model from the one serving. All callers now pass `horizon`, and `tests/test_tuned_alpha.py` checks every call. Tested both ways: the test fails on the `XGB_Tuned` version of the file.
+- **Provenance:** each manifest entry now records its `quantile_alpha`.
+
+**Checks run before adopting it, and what they showed:**
+
+| Check | Result | What it means |
+|---|---|---|
+| Re-run the LOSO sweep as written, on this branch's data (a few days newer) | Same α in **4 of 18** cells; all 18 now pass both seasons (16 on `XGB_Tuned`). Per-cell F2 differences between neighbouring α values: median 0.011 | The per-cell choice sits within noise |
+| Re-run it **with the 2024–26 holdout excluded from training** (the LOSO folds train on every year except the held-out one, which included the holdout) | **14 of 18** α change again, mostly up to 0.95 | The holdout did influence the table, so it isn't strictly untouched. The direction is robust: 0.90–0.95 beats 0.85 in every run |
+| Out-of-time comparison: `xgboost_q85` only, trained on pre-holdout data with the purged boundary, scored once on the 2024–26 holdout (`experiments/alpha_holdout_check.py`) | Recall / false alarms / F2 / cells passing dual bar: **flat 0.85: 0.69 / 1.6% / 0.640 / 4**; **tuned table: 0.79 / 2.2% / 0.686 / 8**; flat 0.90: 0.77 / 2.0% / 0.678 / 5; flat 0.95: 0.83 / 2.5% / 0.700 / 9 | The tuning is a real improvement over 0.85: +10 points of haze hours caught for +0.6 points of false alarms. A single α of 0.90–0.95 gives a similar trade-off, so in practice the table is a choice of where to sit between recall and false alarms |
+| Full pipeline: challenger trained in staging, then the promotion gate (check only, not promoted) | Selection picked `xgboost_q85` with the tuned α in 17 groups, ridge in west +6 h. Holdout F2 better than the champion in 13 of 18 groups (e.g. central +12 h 0.553 → 0.715, east +24 h 0.529 → 0.644). Integrity ✓, skill ✓ (15 of 18 within 0.10 of persistence) | Broad improvement |
+| Same gate, regression check | **Held for human review: west +6 h F2 0.779 → 0.628** (ridge selected) | The one genuine regression. It also showed the MAE-based regression check was wrong (it rejected the model for its deliberate upward bias); it now uses F2 (§3.7) |
+| Holdout replay through the four monitors (`backtest_dashboard_xgb_tuned.html`) | Decisions over 118 weeks: **101 none / 8 investigate / 9 retrain** (champion on the same data: 102 / 7 / 9); first retrain signal 31 Aug 2026 (champion: 30 Aug) | Monitoring is as calm with the tuned model; thresholds recalibrate per model, so nothing needed retuning |
+| Replay: haze hours caught vs persistence, whole holdout | Tuned **+6 / +12 / +24 h: 0.81 / 0.77 / 0.69** vs persistence 0.77 / 0.71 / 0.65 (champion 0.82 / 0.69 / 0.59). False alarms 1.3 / 2.3 / 2.6% (champion 1.5 / 1.6 / 1.7%) | **The tuned model beats persistence at every horizon; the champion lost at +12 and +24 h.** That loss was the reason for the "model OR persistence" alert-rule recommendation (§4.5), which is much less needed with this model. Inside the 2026 episode, +24 h false alarms rise to 52% of non-haze hours (champion 33%) |
+
+**Decisions for the team:**
+1. **Accept or fix west +6 h.** Either promote with `--force` and a recorded reason (13 of 18 groups improve), or pin west +6 h to `xgboost_q85` before promoting.
+2. **Choose a point on the recall / false-alarm dial.** The per-cell table, flat 0.90 and flat 0.95 are all defensible, and the per-cell values are not more reliable than a single α. A single α is simpler to explain and maintain.
+3. **Re-tune without the holdout if the table is kept.** For a strictly untouched final test, re-run the LOSO sweep with the holdout period excluded (`reports/model_comparison/loso_rerun_without_holdout.csv` is that run).
+
+Evidence files: `reports/model_comparison/` (`alpha_holdout_check*.csv`, `loso_rerun_*.csv`, `challenger_vs_champion.csv`, and the original `model1_vs_model2_final_test.csv` from `XGB_Tuned`).
+
 ---
 
 ## 4. Orchestration and monitoring

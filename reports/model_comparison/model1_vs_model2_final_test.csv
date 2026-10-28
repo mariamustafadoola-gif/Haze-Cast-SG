@@ -1,0 +1,19 @@
+target,horizon,recall_model1,recall_model2,recall_winner,mae_elevated_model1,mae_elevated_model2,mae_elevated_winner,dual_bar_pass_model1,dual_bar_pass_model2,model2_selected_candidate,persist_recall,persist_mae_elevated
+north,6,0.843,0.871,Model 2,22.32,24.35,Model 1,True,False,xgboost_q85,0.671,20.86
+south,6,0.918,0.927,Model 2,25.31,27.52,Model 1,True,True,xgboost_q85,0.735,27.64
+east,6,0.874,0.91,Model 2,22.66,23.6,Model 1,False,True,xgboost_q85,0.784,24.77
+west,6,0.828,0.618,Model 1,23.3,36.59,Model 1,False,False,ridge,0.792,27.11
+central,6,0.722,0.765,Model 2,27.08,25.74,Model 2,False,False,xgboost_q85,0.744,27.71
+national,6,0.844,0.86,Model 2,20.98,20.88,Model 2,False,False,xgboost_q85,0.79,22.24
+north,12,0.791,0.836,Model 2,22.72,22.53,Model 2,True,True,xgboost_q85,0.616,25.32
+south,12,0.789,0.765,Model 1,27.52,27.28,Model 2,True,True,xgboost_q85,0.659,35.09
+east,12,0.706,0.843,Model 2,27.55,26.73,Model 2,False,True,xgboost_q85,0.729,30.3
+west,12,0.725,0.71,Model 1,28.82,31.85,Model 1,False,False,xgboost_q85,0.73,35.14
+central,12,0.535,0.749,Model 2,36.03,31.69,Model 2,False,False,xgboost_q85,0.665,35.53
+national,12,0.752,0.788,Model 2,26.48,27.06,Model 1,False,False,xgboost_q85,0.731,29.72
+north,24,0.693,0.809,Model 2,24.35,21.79,Model 2,False,True,xgboost_q85,0.617,28.08
+south,24,0.782,0.809,Model 2,29.79,29.55,Model 2,True,True,xgboost_q85,0.639,34.17
+east,24,0.584,0.766,Model 2,35.0,28.71,Model 2,False,True,xgboost_q85,0.641,33.02
+west,24,0.688,0.747,Model 2,35.75,37.02,Model 1,False,False,xgboost_q85,0.66,39.08
+central,24,0.432,0.564,Model 2,43.76,42.08,Model 2,False,False,xgboost_q85,0.665,34.57
+national,24,0.68,0.747,Model 2,31.76,31.47,Model 2,False,False,xgboost_q85,0.685,31.92
