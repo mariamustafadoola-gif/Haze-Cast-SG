@@ -310,6 +310,7 @@ numbers: central +6 h MAE 7.78 / F2 0.69, against their 7.80 / 0.69.
 | `hourly_score.py`, `score.py` | gold + manifests | forecast JSON | stateless scoring (score.py `--pipeline daily` for the next-day model) |
 | `pipeline_store.py` | – | – | the SQLite ledger schema (forecasts, actuals), UTC timestamps, atomic JSON writes |
 | `serving/app.py` | JSON files, manifest, reports | REST | read-only API (§3.8) |
+| `serving/static/index.html` (+ `docs/index.html` copy) | `/config`, `/forecast/hourly`, `/health` | web page | forecast dashboard (§3.9) |
 
 ### 3.3 Candidates
 
@@ -423,6 +424,24 @@ API (`serving/app.py`) is read-only, batch inference behind an endpoint:
 decision and statuses), `/monitoring/dashboard[?kind=backtest]`, `/config`,
 `/health`. Why batch rather than real-time scoring: see
 [`MODEL_GOVERNANCE.md` §2](MODEL_GOVERNANCE.md#2-deployment-options-and-the-choice-made).
+
+### 3.9 Forecast dashboard (from the `XGB_Tuned` branch)
+
+The dashboard was designed on the `XGB_Tuned` branch and brought into this branch with three changes,
+each found by running it against this pipeline. `http://localhost:8000` redirects to it (`/ui/`).
+
+- **What it shows:** a map of the five regions. Each region shows its +6 h forecast and band (Normal / Elevated ≥ 56 / High > 150), with +6/12/24 h underneath, plus the national figure. It refreshes every 60 s.
+- **Live vs demo:** it calls `/config`, `/forecast/hourly` and `/health` on the same origin. On any failure (API down, or 503 because no forecast exists yet) it switches to an embedded demo snapshot and says so ("Live service unreachable — showing saved demo data instead"). `docs/index.html` is an identical copy for GitHub Pages, where there is no API, so it always runs in demo mode.
+
+| Change | What was observed | Why the change is better |
+|---|---|---|
+| Calls `/forecast/hourly` instead of `/forecast` | On `XGB_Tuned`, `/forecast` was repurposed to return hourly rows. Here `/forecast` is the next-day daily product (used by the monitoring DAG), and hourly forecasts are at `/forecast/hourly` | Keeps both products and the existing API contract. A test now fails if the page ever calls an endpoint the API doesn't have |
+| Values rounded to one decimal on screen | This pipeline stores forecasts unrounded (they feed the accuracy metrics), so the page showed "38.54625701904297 µg/m³" | Readable numbers; the stored values keep full precision |
+| Stale-forecast notice | The page showed only when it was *refreshed*, not how old the *forecast* was. With the stack stopped, a 37-hour-old forecast looked current | When the newest forecast is more than 3 h old (the pipeline refuses to forecast from data over 2 h old), a one-line notice appears. Otherwise the original design is unchanged |
+
+Verified in headless Chrome: with live data (rounded values, notice shown for a 37 h old forecast), and from `file://` with no API (demo mode with the fallback message). `tests/test_api.py` covers the routes, the redirect, the 503 that triggers demo mode, the fields the page reads, and that the page and its GitHub Pages copy stay identical.
+
+The API container now mounts `serving/` and `src/` like the Airflow containers, so dashboard or API edits apply on restart without rebuilding the image.
 
 ---
 

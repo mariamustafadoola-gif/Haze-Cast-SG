@@ -7,6 +7,12 @@ the most recently written files cheaply: the deployment pattern is batch
 inference behind a read-only endpoint (see docs/MODEL_GOVERNANCE.md,
 "Deployment options").
 
+The forecast dashboard (serving/static/index.html, designed on the XGB_Tuned
+branch) is served at /ui and calls /config, /forecast/hourly and /health on the
+same origin. If the API or the forecast file is unavailable it falls back to an
+embedded demo snapshot and says so on screen. docs/index.html is the same page
+for static hosting (GitHub Pages), where it always runs on the demo snapshot.
+
 Run locally with: uvicorn serving.app:app --reload
 Run in Docker via the `api` service in docker-compose.yml.
 """
@@ -15,7 +21,8 @@ import json
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from hazecast.config import GOLD_DIR, MODELS_DIR, MONITORING_DIR, PM25_ELEVATED_THRESHOLD, REPO_ROOT
 
@@ -31,6 +38,12 @@ def _read_json(path: Path, missing: str):
     if not path.exists():
         raise HTTPException(status_code=503, detail=missing)
     return json.loads(path.read_text())
+
+
+@app.get("/", include_in_schema=False)
+def root():
+    """Open the dashboard by default."""
+    return RedirectResponse(url="/ui/")
 
 
 @app.get("/health")
@@ -99,3 +112,8 @@ def get_config():
     """Expose the decision threshold so the dashboard/alerting stays in
     sync with what the model was evaluated against."""
     return {"elevated_threshold_ug_m3": PM25_ELEVATED_THRESHOLD}
+
+
+# Dashboard: static page calling the endpoints above on the same origin (no CORS
+# needed). Mounted last so it can never shadow an API route.
+app.mount("/ui", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="ui")

@@ -74,7 +74,9 @@ src/hazecast/
   dashboard.py           performance & stability dashboard (HTML)
   governance.py          champion/challenger promotion gate, rollback
   orchestration.py       the task functions the DAGs call
-serving/app.py            FastAPI: /forecast/hourly, /forecast, /model, /monitoring, /monitoring/dashboard
+serving/app.py            FastAPI: /ui (dashboard), /forecast/hourly, /forecast, /model, /monitoring, /monitoring/dashboard
+serving/static/index.html forecast dashboard (map of the 5 regions, +6/12/24 h), with a built-in demo fallback
+docs/index.html           the same dashboard for static hosting (GitHub Pages; always demo data)
 dags/                     hazecast_backfill, hazecast_hourly, hazecast_monitoring, hazecast_retrain
 docker/                   pipeline.Dockerfile (API, Jupyter), airflow.Dockerfile
 docs/MODEL_GOVERNANCE.md  deployment choice, monitors, retraining triggers, promotion/rollback SOP
@@ -215,7 +217,7 @@ docker compose up -d --build      # postgres, airflow (init/webserver/scheduler)
 2. After that, **`hazecast_hourly`** issues 18 forecasts every hour, and
    **`hazecast_monitoring`** runs the four monitors each night and triggers
    retraining when the governance rule says so.
-3. Results: `localhost:8000/forecast/hourly`, `/monitoring`,
+3. Results: the **forecast dashboard at `localhost:8000`** (redirects to `/ui/`), `localhost:8000/forecast/hourly`, `/monitoring`,
    `/monitoring/dashboard` (live) and `/monitoring/dashboard?kind=backtest`
    (holdout replay); MLflow at `localhost:5000`.
 
