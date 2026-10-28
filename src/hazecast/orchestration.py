@@ -87,6 +87,10 @@ def features_fresh(max_age_hours: float = 2.0) -> bool:
     newest = pd.Timestamp(gold.loc[ok, "date"].max()).tz_localize("Asia/Singapore")
     age = (pd.Timestamp.now(tz="UTC") - newest).total_seconds() / 3600
     log.info("Newest complete hour %s is %.2f h old (limit %.1f h)", newest, age, max_age_hours)
+    if "fire_carried_hours" in gold:
+        carried = float(gold.loc[ok, "fire_carried_hours"].iloc[-1])
+        if carried > 0:
+            log.warning("FIRMS is late: that hour's fire features were carried forward %.0f h", carried)
     return age <= max_age_hours
 
 

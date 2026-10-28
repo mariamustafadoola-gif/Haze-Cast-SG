@@ -48,7 +48,7 @@ def _prepare(gold):
 
 
 def _feature_columns(gold):
-    cols = [c for c in gold if c not in {"date", "label_low_coverage"}
+    cols = [c for c in gold if c not in {"date", "label_low_coverage", "fire_carried_hours"}
             and not c.startswith(("label_", "target_"))]
     if USE_SELECTED_FEATURES:
         # keep only the data team's selected set (see config.SELECTED_FEATURES_HOURLY)

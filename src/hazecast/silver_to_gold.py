@@ -18,7 +18,7 @@ from hazecast.config import (
     SILVER_DIR, GOLD_DIR, SG_REGIONS, WEATHER_POINTS, FIRE_REGIONS,
     HOTSPOT_LAGS, ROLLING_WINDOWS, FORECAST_HORIZON_DAYS,
     FORECAST_HORIZON_HOURS, HOURLY_RAIN_ROLLING_WINDOWS, FIRE_DAY_AVAILABLE_HOUR_SGT,
-    FIRE_LATENCY_HOURS,
+    FIRE_LATENCY_HOURS, FIRE_CARRY_FORWARD_HOURS,
 )
 
 log = logging.getLogger(__name__)
@@ -213,6 +213,29 @@ def _fire_features_hourly(firms_hourly: pd.DataFrame, firms_daily: pd.DataFrame)
     return out.drop(columns="fire_date")
 
 
+def _carry_fire_forward(gold: pd.DataFrame, fire_cols: list[str],
+                        limit_hours: float = FIRE_CARRY_FORWARD_HOURS) -> pd.DataFrame:
+    """Late FIRMS delivery: give the hours after the last hour with known fire features that
+    hour's values, for up to `limit_hours`, and record the carry in `fire_carried_hours`
+    (0 when the features are current). Rows further out keep empty fire features. Only the
+    live edge is affected: earlier hours all have known features once a later detection arrives.
+    """
+    gold = gold.sort_values("ts").reset_index(drop=True)
+    gold["fire_carried_hours"] = 0.0
+    known = gold[fire_cols].notna().all(axis=1)
+    if not known.any():
+        return gold
+    last = gold.loc[known, "ts"].max()
+    carried = (gold["ts"] - last) / pd.Timedelta(hours=1)
+    tail = carried > 0
+    fill = tail & (carried <= limit_hours)
+    gold.loc[fill, fire_cols] = gold.loc[gold["ts"] == last, fire_cols].to_numpy()
+    gold.loc[tail, "fire_carried_hours"] = carried[tail]
+    if fill.any():
+        log.warning("FIRMS late: fire features carried forward from %s for up to %.0f h", last, carried[fill].max())
+    return gold
+
+
 def fire_day_for_hour(ts: pd.Series) -> pd.Series:
     """The latest FIRMS (UTC) day whose detections are complete at each Singapore hour."""
     return (ts - pd.Timedelta(hours=FIRE_DAY_AVAILABLE_HOUR_SGT)).dt.floor("D") - pd.Timedelta(days=1)
@@ -276,6 +299,7 @@ def build_gold_hourly(
     weather = _weather_features_hourly(weather_silver_df)
 
     gold = pm25.merge(fire, on="ts", how="left").merge(weather, on="ts", how="left")
+    gold = _carry_fire_forward(gold, [c for c in fire if c != "ts"])
     gold = pd.concat([gold, _upwind_features_hourly(gold)], axis=1)
 
     # Persistence features: this hour's own reading.

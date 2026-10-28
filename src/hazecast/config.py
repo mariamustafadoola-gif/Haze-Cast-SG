@@ -122,6 +122,15 @@ FIRE_LATENCY_HOURS = 3                       # FIRMS near-real-time delivery: wi
 # outage as "no fires". 15 h = one pass interval + ~3 h delivery margin; in 12 years of data,
 # silences > 15 h occurred 295 times vs 298 for > 13 h, so the margin costs no outage detection.
 FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION = 15
+# When FIRMS is late (28 Oct 2026: the 13:00 SGT pass was still undelivered 6 h later, so the
+# fire features went empty and two hourly forecasts were skipped), the last known fire features
+# are carried forward for up to this many hours instead. Only delivered detections are used (no
+# look-ahead); the windows are 24-168 h long, so a few hours' extra age changes them little.
+# Each forecast records how long its fire features were carried (fire_carried_hours). The
+# carried values exist only at the live edge: gold is rebuilt every hour, and once FIRMS
+# delivers, those hours get their true counts, so training never sees carried values. Past this
+# limit the features stay empty and the forecast gate refuses, as before.
+FIRE_CARRY_FORWARD_HOURS = 24
 # FIRMS dates detections by UTC day (ends 08:00 SGT); a day's count is complete from 11:00 SGT
 # the next day. Used for the day-based satellite-gap flag in the hourly table.
 FIRE_DAY_AVAILABLE_HOUR_SGT = 11

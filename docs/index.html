@@ -229,6 +229,8 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
   // forecast from data over 2 h old, so anything older means several hourly runs were skipped.
   const STALE_HOURS = 3;
   let forecastAgeHours = null;
+  // Hours the fire features were carried forward because NASA FIRMS was late (0 = current).
+  let fireCarriedHours = 0;
   let dataMode = MODE_LIVE;
   let mockReason = "manual"; // "manual" (user chose Mockup) or "fallback" (live call failed)
 
@@ -315,6 +317,7 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     // Age of the newest data the forecast was made from (null if not given, e.g. older files).
     const asOf = forecastData.map(r => Date.parse(r.as_of_time)).filter(Number.isFinite);
     forecastAgeHours = asOf.length ? (Date.now() - Math.max(...asOf)) / 3600000 : null;
+    fireCarriedHours = Math.max(0, ...forecastData.map(r => Number(r.fire_carried_hours) || 0));
     // Health is best-effort and doesn't gate live mode -- it just reflects
     // whether the API process itself looks up, separately from forecast data.
     try {
@@ -329,6 +332,7 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     threshold = MOCK_CONFIG.elevated_threshold_ug_m3;
     forecastData = MOCK_FORECAST;
     forecastAgeHours = null;
+    fireCarriedHours = 0;
     setHealthPill("mock");
   }
 
@@ -341,9 +345,17 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
         ? "Live service unreachable — showing saved demo data instead."
         : "Mockup mode — showing saved demo data, not live.";
       note.classList.add("show");
-    } else if (forecastAgeHours != null && forecastAgeHours > STALE_HOURS) {
-      note.textContent = "Forecast is from data " + Math.round(forecastAgeHours) +
-        " h old — newer data is not available yet, so treat it with caution.";
+    } else if ((forecastAgeHours != null && forecastAgeHours > STALE_HOURS) || fireCarriedHours > 0) {
+      const parts = [];
+      if (forecastAgeHours != null && forecastAgeHours > STALE_HOURS) {
+        parts.push("Forecast is from data " + Math.round(forecastAgeHours) +
+          " h old — newer data is not available yet, so treat it with caution.");
+      }
+      if (fireCarriedHours > 0) {
+        parts.push("Satellite fire data is " + Math.round(fireCarriedHours) +
+          " h late — this forecast uses the last fire counts received.");
+      }
+      note.textContent = parts.join(" ");
       note.classList.add("show");
     } else {
       note.classList.remove("show");

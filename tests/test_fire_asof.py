@@ -10,7 +10,9 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from hazecast.config import FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION, FIRE_LATENCY_HOURS, SG_REGIONS, WEATHER_POINTS
+from hazecast.config import (
+    FIRE_CARRY_FORWARD_HOURS, FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION, FIRE_LATENCY_HOURS, SG_REGIONS, WEATHER_POINTS,
+)
 from hazecast.silver_to_gold import build_gold_hourly, fire_day_for_hour
 
 GAP = FIRE_LATENCY_HOURS + 1
@@ -62,12 +64,26 @@ def test_no_row_uses_a_detection_made_after_it():
         assert (np.isnan(expected) and np.isnan(got)) or got == expected, i
 
 
-def test_forecastable_all_morning_but_not_through_an_outage():
+def test_forecastable_all_morning_and_through_a_late_delivery_but_not_an_outage():
     # Last detection at 02:00 on day 12 (the night pass); the feed then goes quiet.
     last = 24 * 11 + 2
-    pm, we, fd, fh = _silver(hours=24 * 13, detections={last: 5}, fire_end=last + 1 + FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION)
+    pm, we, fd, fh = _silver(hours=24 * 14, detections={last: 5}, fire_end=last + 1 + FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION)
     gold = build_gold_hourly(pm, we, fd, fh).set_index("date")
-    day12 = gold.loc["2026-10-12"]
     known_until = gold.index[last] + pd.Timedelta(hours=FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION)
-    assert day12.loc[:known_until, "fire_sumatra_lag0"].notna().all()   # the whole morning is forecastable
-    assert gold.loc["2026-10-13", "fire_sumatra_lag0"].isna().all()     # a silent feed is not "no fires"
+    carry_until = known_until + pd.Timedelta(hours=FIRE_CARRY_FORWARD_HOURS)
+    known, carried = gold.loc[:known_until], gold.loc[known_until:carry_until].iloc[1:]
+    assert known.loc["2026-10-12", "fire_sumatra_lag0"].notna().all()   # the whole morning is forecastable
+    assert (known["fire_carried_hours"] == 0).all()
+    # A late delivery: the last known features, unchanged, with the carry recorded
+    fire_cols = [c for c in gold if c.startswith("fire_") and c != "fire_carried_hours"] + ["fire_data_gap_recent"]
+    assert (carried[fire_cols] == gold.loc[known_until, fire_cols]).all().all()
+    assert list(carried["fire_carried_hours"]) == list(range(1, FIRE_CARRY_FORWARD_HOURS + 1))
+    assert carried["upwind_sumatra"].notna().all()
+    # Past the limit, a silent feed is still not "no fires"
+    assert gold.loc[carry_until:].iloc[1:]["fire_sumatra_lag0"].isna().all()
+
+
+def test_carry_is_not_a_model_feature():
+    from hazecast.hourly_model import _feature_columns
+    gold = build_gold_hourly(*_silver(hours=24 * 10, detections={50: 3}))
+    assert "fire_carried_hours" in gold and "fire_carried_hours" not in _feature_columns(gold)

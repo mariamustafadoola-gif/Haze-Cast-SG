@@ -307,7 +307,16 @@ B was the first fix tried. It removed the leak but lost accuracy (F2 0.641 → 0
 
 E keeps one meaning at every hour, "fires detected in the latest 24 h that FIRMS has delivered", and needs no data from today. It matches the old recall with fewer false alarms and better F2, MAE and +24 h recall.
 
-**Live edge.** Between passes, "no new detections" is normal; after a missed pass or a stalled feed it is not. Over 12 years the gap between detections was about 11 h (the pass interval), and only 295 gaps exceeded 15 h. Hourly counts are therefore trusted up to **15 h after the latest detection** (`FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION`). Beyond that the features are empty and the forecast gate refuses, so an outage is never read as "no fires". Gaps inside the history keep the existing zero-plus-flag treatment.
+**Live edge.** Between passes, "no new detections" is normal; after a missed pass or a stalled feed it is not. Over 12 years the gap between detections was about 11 h (the pass interval), and only 295 gaps exceeded 15 h. Hourly counts are therefore trusted up to **15 h after the latest detection** (`FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION`). Beyond that the features are empty, so an outage is never read as "no fires". Gaps inside the history keep the existing zero-plus-flag treatment.
+
+**Late delivery: carry forward up to 24 h.** On 28 Oct 2026, FIRMS had not delivered the 13:00 SGT pass more than 10 h later, so from 17:00 SGT the fire features were empty and the hourly forecasts stopped. Now, after the last hour with known fire features, those values are carried forward for up to **24 h** (`FIRE_CARRY_FORWARD_HOURS`):
+- **No look-ahead:** only detections already delivered are used.
+- **Little accuracy cost:** the windows are 24–168 h long, so a few hours' extra age changes them little.
+- **Training is unaffected:** gold is rebuilt every hour, and once FIRMS delivers, the carried hours get their true counts.
+- **Labelled:** each forecast records `fire_carried_hours` (0 = current), in the archive and the API. The dashboard says when fire data is late.
+- **Limit:** after 24 h the features are empty again and the forecast gate refuses.
+
+First use: the 00:10 SGT run on 29 Oct forecast with fire features carried 8 h.
 
 **Result.** On 28 Oct at 13:57 the newest forecastable hour became 13:00 (1 h old) instead of 23:00 the previous night. `tests/test_fire_asof.py` checks:
 - no row uses a detection before it was delivered (recomputed independently, row by row);

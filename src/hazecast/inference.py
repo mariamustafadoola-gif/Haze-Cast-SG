@@ -63,6 +63,8 @@ def predict_final(gold_path, models_dir, *, max_feature_age_hours=2, now=None):
     age = (now - origin).total_seconds() / 3600
     if age > max_feature_age_hours:
         raise RuntimeError(f"Features are {age:.2f}h old (limit {max_feature_age_hours}h). Refresh silver/gold; no forecasts archived.")
+    # > 0 when FIRMS was late and the fire features were carried forward (silver_to_gold)
+    fire_carried = float(row["fire_carried_hours"].iloc[0]) if "fire_carried_hours" in row else 0.0
     digest = hashlib.sha256(raw).hexdigest()
     records = []
     for horizon in HORIZONS:
@@ -97,7 +99,8 @@ def predict_final(gold_path, models_dir, *, max_feature_age_hours=2, now=None):
                 model_run_id=entry.get("run_id"), manifest_sha256=digest,
                 forecast_pm25=prediction, threshold=threshold,
                 elevated_flag=int(prediction >= threshold), feature_age_hours=age,
-                persistence_pm25=float(row[f"now_{target}"].iloc[0])))
+                persistence_pm25=float(row[f"now_{target}"].iloc[0]),
+                fire_carried_hours=fire_carried))
     return records
 
 

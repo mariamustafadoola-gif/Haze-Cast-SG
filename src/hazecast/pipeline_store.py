@@ -60,6 +60,10 @@ def connect(path):
             PRIMARY KEY(observation_time, region)
         );
     ''')
+    # Added after the first archives were written: how long the fire features had been
+    # carried forward because FIRMS was late (0 = current).
+    if "fire_carried_hours" not in {r["name"] for r in db.execute("PRAGMA table_info(forecasts)")}:
+        db.execute("ALTER TABLE forecasts ADD COLUMN fire_carried_hours REAL NOT NULL DEFAULT 0")
     return db
 
 
