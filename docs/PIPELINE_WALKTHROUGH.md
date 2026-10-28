@@ -400,7 +400,7 @@ replays its holdout, and only then calls `governance.promote`:
 |---|---|---|
 | Integrity | 18 entries; every artifact loads; finite prediction on the latest complete gold row | catches a broken or incomplete training run before it serves |
 | Skill | holdout F2 within **0.10** of persistence's in **≥ 50 %** of the groups with haze hours | aligned with the selection objective (F2). An earlier draft used MAE skill, which **would have rejected every model** (0 of 18 beat persistence on MAE, by design). Persistence is a floor, not a target, because it cannot forecast onset. The current champion: 15 of 18 within tolerance |
-| No regression | holdout MAE ≤ 1.10 × the champion's in a majority of groups | a guard-rail against a clearly worse model (the two holdouts are different windows, so not a contest) |
+| No regression | F2 within 0.05 of the champion's in ≥ half the groups; no group's F2 down by more than 0.10 (otherwise human review); MAE ≤ 2 × the champion's in every group | Judged on the selection objective. An earlier MAE-based version (≤ 1.10×) rejected the LOSO-tuned challenger, which had F2 better in 13/18 groups but deliberately higher forecasts (MAE up to 1.8×), and missed its one real regression (west +6 h, F2 −0.151), which the F2 rule flags |
 
 On pass: artifacts are copied, the old manifest is archived to
 `history/`, and the new manifest is written **last** (atomic replace), so

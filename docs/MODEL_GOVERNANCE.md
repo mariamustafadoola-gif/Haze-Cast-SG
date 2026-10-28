@@ -102,7 +102,11 @@ automatically once its labels are in the development window.
 3. `promote` (`hazecast.governance`); **all** must pass:
    - **Integrity:** 18 entries, every artifact loads and gives a finite prediction on the latest gold row.
    - **Skill:** holdout **F2** within 0.10 of persistence's in ≥ 50 % of the groups with haze hours. F2, not MAE: the q85 models never beat persistence on MAE (0 of 18 groups), so an MAE gate would reject every model. Persistence is a floor, not a target, because it cannot forecast the onset of an episode. Current champion: 15 of 18 within tolerance.
-   - **No regression:** holdout MAE no more than 10 % worse than the champion's in a majority of groups. The two holdouts cover different periods, so this is a guard-rail, not a contest.
+   - **No regression, judged on F2:**
+     - F2 within 0.05 of the champion's in at least half the groups.
+     - **No single group's F2 falling by more than 0.10.** If one does, the challenger is held for a person to decide (`--force` with a recorded reason), not promoted automatically.
+     - MAE at most 2× the champion's in every group, as a blow-up guard.
+     The first version of this check used MAE (within 10%). Evaluating the LOSO-tuned model from the `XGB_Tuned` branch showed why that was wrong: it improved F2 in 13 of 18 groups, but a higher quantile forecasts higher by design (MAE up to 1.8×), so the MAE rule rejected it. It also did not single out the one genuine regression (west +6 h, F2 0.779 → 0.628). The F2 rule passes the broad improvement and flags exactly that group.
 4. **Pass:** artifacts are copied, the old manifest is archived to `history/`, and the new manifest is written **last**, so inference never sees a half-published model. The monitoring baseline (including the calibrated limits) is rebuilt for the new champion. **Fail:** the champion keeps serving, and the rejection and its reasons go to `promotion_log.jsonl`.
 5. **Rollback** (any time, one command, no retraining): `python -m hazecast.governance rollback` restores the previous manifest. Artifacts are never deleted, so any archived version can be restored with `--to`.
 6. **Manual override:** `python -m hazecast.governance promote --candidate <dir> --force` promotes despite a failed gate. Only the ML owner may use it, and the reason must be written in the log entry and the team channel.

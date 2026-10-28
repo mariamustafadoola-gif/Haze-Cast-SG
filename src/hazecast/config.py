@@ -354,7 +354,12 @@ ATTRIBUTION_NDCG_ALERT = 0.90      # SageMaker Clarify's default; a ceiling -- p
 ATTRIBUTION_SAMPLE_ROWS = 3000
 # Governance
 MAX_MODEL_AGE_DAYS = 35            # scheduled refresh even without drift (monthly retrain + slack)
-PROMOTION_MAX_MAE_DEGRADATION = 0.10  # challenger holdout MAE may be at most 10% worse than champion's
+# Regression vs the champion is judged on F2 (the selection objective), not MAE: a higher
+# quantile forecasts higher by design (the LOSO-tuned challenger had 13/18 groups better on
+# F2 but MAE up to 1.8x the champion's).
+PROMOTION_F2_REGRESSION = 0.05        # F2 may trail the champion's by at most this in >= half the groups
+PROMOTION_F2_SEVERE_DROP = 0.10       # any group dropping more than this -> human review, no auto-promotion
+PROMOTION_MAX_MAE_RATIO = 2.0         # MAE blow-up guard per group (designed bias reached 1.8x)
 PROMOTION_F2_TOLERANCE = 0.10         # challenger holdout F2 may trail persistence's by at most this ...
 PROMOTION_MIN_SKILL_TARGETS = 0.5     # ... in at least this share of groups with haze hours in the holdout
                                       # (2024-26 holdout: 14 of 18 groups within 0.10; only 6 of 18 ahead)

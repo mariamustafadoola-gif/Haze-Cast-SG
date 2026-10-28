@@ -18,10 +18,16 @@ Promotion gate (all must pass):
                    Not MAE: the q85 models are upward-biased by design and never beat
                    persistence on MAE (0 of 18 groups on the 2024-26 holdout). Persistence is
                    a floor, not a target: it cannot forecast the onset of an episode at all.
-  3. no regression vs the champion's recorded holdout: MAE at most
-                   PROMOTION_MAX_MAE_DEGRADATION worse in a majority of groups
-     (the two holdouts are different time windows, so this is a guard-rail
-     against a clearly worse model, not a head-to-head contest)
+  3. no regression vs the champion's recorded holdout, judged on the selection
+     objective (F2), not MAE:
+       - F2 within PROMOTION_F2_REGRESSION of the champion's in at least half the groups;
+       - no group whose F2 drops by more than PROMOTION_F2_SEVERE_DROP (such a challenger
+         goes to a person, who may --force it with a recorded reason);
+       - MAE at most PROMOTION_MAX_MAE_RATIO x the champion's in every group, a blow-up
+         guard that still allows the deliberate upward bias of high-quantile models.
+     Why: an MAE rule (the first version) rejected the LOSO-tuned challenger even though
+     it improved F2 in 13 of 18 groups, because a higher quantile forecasts higher by
+     design; and it would not have singled out the one real regression (west +6 h).
 Promotion copies the challenger's artifacts, writes the manifest last (so
 inference never sees a half-published model), archives the old manifest under
 history/ and appends to promotion_log.jsonl. Artifacts have unique names and
@@ -117,25 +123,33 @@ def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
             test = e.get("final_test") or {}
             mae, f2 = test.get("mae"), test.get("f2")
             pers = _persistence_holdout(gold, t, h, e["test_start"], float(manifest["threshold"]))
-            champ_mae = (((champion or {}).get("models", {}).get(str(h), {}).get(t) or {}).get("final_test") or {}).get("mae")
+            champ = (((champion or {}).get("models", {}).get(str(h), {}).get(t) or {}).get("final_test") or {})
+            champ_mae, champ_f2 = champ.get("mae"), champ.get("f2")
             groups[f"{t}|{h}"] = dict(
                 model=e["model"], holdout_mae=mae, persistence_mae=pers["mae"], holdout_f2=f2, persistence_f2=pers["f2"],
                 f2_vs_persistence=(f2 - pers["f2"]) if f2 is not None and pers["f2"] is not None else None,
-                champion_mae=champ_mae,
-                mae_change=(mae / champ_mae - 1) if mae is not None and champ_mae else None)
+                champion_mae=champ_mae, champion_f2=champ_f2,
+                mae_ratio=(mae / champ_mae) if mae is not None and champ_mae else None,
+                f2_change=(f2 - champ_f2) if f2 is not None and champ_f2 is not None else None)
     diffs = [g["f2_vs_persistence"] for g in groups.values() if g["f2_vs_persistence"] is not None]
     share = float(np.mean([d >= -C.PROMOTION_F2_TOLERANCE for d in diffs])) if diffs else 1.0
     checks["skill"] = dict(passed=share >= C.PROMOTION_MIN_SKILL_TARGETS, share_within_f2_tolerance=share,
                            groups_with_haze=len(diffs), tolerance=C.PROMOTION_F2_TOLERANCE,
                            required=C.PROMOTION_MIN_SKILL_TARGETS,
                            note="no haze hours in holdout: skill not judged" if not diffs else None)
-    changes = [g["mae_change"] for g in groups.values() if g["mae_change"] is not None]
-    if champion is None or not changes:
+    if champion is None:
         checks["no_regression"] = dict(passed=True, note="no champion to compare against")
     else:
-        ok_share = float(np.mean([c <= C.PROMOTION_MAX_MAE_DEGRADATION for c in changes]))
-        checks["no_regression"] = dict(passed=ok_share > 0.5, share_within_tolerance=ok_share,
-                                       tolerance=C.PROMOTION_MAX_MAE_DEGRADATION)
+        f2_changes = {k: g["f2_change"] for k, g in groups.items() if g["f2_change"] is not None}
+        within = float(np.mean([d >= -C.PROMOTION_F2_REGRESSION for d in f2_changes.values()])) if f2_changes else 1.0
+        severe = {k: round(d, 3) for k, d in f2_changes.items() if d < -C.PROMOTION_F2_SEVERE_DROP}
+        blown = {k: round(g["mae_ratio"], 2) for k, g in groups.items()
+                 if g["mae_ratio"] is not None and g["mae_ratio"] > C.PROMOTION_MAX_MAE_RATIO}
+        checks["no_regression"] = dict(
+            passed=within >= 0.5 and not severe and not blown, share_f2_within_tolerance=within,
+            f2_tolerance=C.PROMOTION_F2_REGRESSION, severe_f2_drops=severe, mae_blowups=blown,
+            groups_f2_improved=sum(d > 0 for d in f2_changes.values()), groups_compared=len(f2_changes),
+            note=("needs human review: severe F2 drop in " + ", ".join(severe)) if severe else None)
     return dict(passed=all(c["passed"] for c in checks.values()), checks=checks, groups=groups)
 
 

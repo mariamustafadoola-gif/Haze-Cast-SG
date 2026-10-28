@@ -27,7 +27,7 @@ def gold_path(tmp_path):
     return path
 
 
-def _model_dir(path, gold_path, mae, tag):
+def _model_dir(path, gold_path, mae, tag, f2=None, f2_override=None):
     path.mkdir(parents=True)
     gold = pd.read_parquet(gold_path)
     cols = ["x"] + [f"now_{t}" for t in TARGETS]
@@ -39,7 +39,8 @@ def _model_dir(path, gold_path, mae, tag):
             name = f"{t}_h{h}_{tag}.joblib"
             joblib.dump(est, path / name)
             models[str(h)][t] = dict(model="ridge", artifact=name, test_start="2026-02-01T00:00:00+08:00",
-                                     final_test=dict(mae=mae, f2=None), validation=dict(mae=mae))
+                                     final_test=dict(mae=mae, f2=(f2_override or {}).get((t, h), f2)),
+                                     validation=dict(mae=mae))
     (path / g.MANIFEST).write_text(json.dumps(dict(schema_version=1, pipeline="hourly", horizons_hours=list(HORIZONS),
                                                    feature_columns=cols, threshold=56.0, models=models)))
     return path
@@ -71,3 +72,22 @@ def test_broken_artifact_fails_integrity(tmp_path, gold_path):
     (cand / "north_h6_a.joblib").write_bytes(b"not a model")
     result = g.promote(cand, tmp_path / "prod", gold_path)
     assert not result["promoted"] and not result["checks"]["integrity"]["passed"]
+
+
+def test_regression_is_judged_on_f2_not_mae(tmp_path, gold_path):
+    """A higher-quantile challenger forecasts higher (worse MAE) but catches more haze: promote it.
+    One group collapsing on F2 is held for human review instead of promoted automatically."""
+    prod = tmp_path / "prod"
+    assert g.promote(_model_dir(tmp_path / "champ", gold_path, mae=8.0, tag="a", f2=0.60), prod, gold_path)["promoted"]
+
+    biased = _model_dir(tmp_path / "biased", gold_path, mae=12.0, tag="b", f2=0.66)   # MAE 1.5x, F2 better
+    r = g.check_candidate(biased, prod, gold_path)
+    assert r["checks"]["no_regression"]["passed"], r["checks"]["no_regression"]
+
+    one_bad = _model_dir(tmp_path / "one_bad", gold_path, mae=12.0, tag="c", f2=0.66, f2_override={("west", 6): 0.45})
+    r = g.check_candidate(one_bad, prod, gold_path)
+    nr = r["checks"]["no_regression"]
+    assert not nr["passed"] and "west|6" in nr["severe_f2_drops"] and "human review" in nr["note"]
+
+    blown = _model_dir(tmp_path / "blown", gold_path, mae=20.0, tag="d", f2=0.70)      # MAE 2.5x: broken
+    assert g.check_candidate(blown, prod, gold_path)["checks"]["no_regression"]["mae_blowups"]
