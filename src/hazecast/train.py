@@ -83,6 +83,19 @@ def _metrics(y_true, y_pred, threshold=PM25_ELEVATED_THRESHOLD):
                 tp=tp, fp=fp, fn=fn, n_test=len(y), n_elevated=int(actual.sum()))
 
 
+def save_model(model, path):
+    """Write a fitted model with Python's standard C pickler (loadable by joblib.load).
+
+    Not joblib.dump: joblib pickles with the pure-Python pickler, whose dispatch table
+    Airflow's import of `dill` patches, so models trained inside some Airflow task
+    processes silently required `dill` to load (found 2026-10-28: the retrain's artifacts
+    referenced dill._dill, earlier ones did not). The C pickler is not patched.
+    """
+    import pickle
+    with open(path, "wb") as fh:
+        pickle.dump(model, fh, protocol=pickle.HIGHEST_PROTOCOL)
+
+
 def _make_model(name):
     if name == "ridge":
         return make_pipeline(StandardScaler(), Ridge(alpha=RIDGE_ALPHA))
@@ -262,7 +275,7 @@ def train_final_models(gold):
             if model is not None:
                 # Unique names keep the previous manifest valid until publication.
                 path = MODELS_DIR / f"daily_{target}_{run.info.run_id}.joblib"
-                joblib.dump(model, path)
+                save_model(model, path)
                 paths[target] = path
                 entry["artifact"] = path.name
                 _log_selected_model(model, selection["model"])

@@ -20,7 +20,7 @@ from hazecast.config import (
     PM25_ELEVATED_THRESHOLD, MODEL_CANDIDATES, CV_SPLITS,
     FINAL_TEST_FRACTION, MIN_TRAIN_ROWS, HOURLY_MLFLOW_EXPERIMENT, REPO_ROOT,
 )
-from hazecast.train import _make_model, _metrics, _json_safe, _log_selected_model
+from hazecast.train import _make_model, _metrics, _json_safe, _log_selected_model, save_model
 
 log = logging.getLogger(__name__)
 TARGETS = SG_REGIONS + ["national"]
@@ -239,7 +239,7 @@ def train_final_hourly_models(gold, *, horizons=None, out_dir=None):
                 path = None
                 if model is not None:
                     path = out_dir / f"{target}_h{horizon}_{run.info.run_id}.joblib"
-                    joblib.dump(model, path)
+                    save_model(model, path)
                     entry["artifact"] = path.name
                     _log_selected_model(model, selection["model"])
                     mlflow.log_artifact(str(path))

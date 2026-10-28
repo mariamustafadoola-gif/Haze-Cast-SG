@@ -11,7 +11,9 @@ directory hazecast.inference reads), following docs/MODEL_GOVERNANCE.md.
 
 Promotion gate (all must pass):
   1. integrity     manifest complete (18 target x horizon entries), every artifact
-                   loads and gives a finite prediction on the latest complete gold row
+                   loads and gives a finite prediction on the latest complete gold row,
+                   and no artifact needs a module outside the declared requirements
+                   (e.g. `dill`, which Airflow's environment can leak into pickles)
   2. skill         on its own untouched holdout, the challenger's F2 (elevated-hour detection,
                    the selection objective) is within PROMOTION_F2_TOLERANCE of persistence's
                    for at least PROMOTION_MIN_SKILL_TARGETS of the groups with haze hours.
@@ -79,6 +81,26 @@ def _persistence_holdout(gold: pd.DataFrame, target: str, horizon: int, test_sta
     return dict(mae=float(np.abs(p - y).mean()), f2=float(5 * tp / (5 * tp + 4 * fn + fp)) if actual.any() else None)
 
 
+# Modules an artifact may not depend on: present in the Airflow image but not declared in
+# requirements-pipeline.txt, so a model needing them only loads inside Airflow.
+UNDECLARED_PICKLE_MODULES = ("dill",)
+
+
+def pickle_modules(path: Path) -> set[str]:
+    """Top-level modules referenced by a pickle file's globals, read without unpickling it."""
+    import pickletools
+    mods, strings = set(), []
+    with open(path, "rb") as fh:
+        for op, arg, _ in pickletools.genops(fh):
+            if op.name == "GLOBAL":
+                mods.add(str(arg).split(" ")[0].split(".")[0])
+            elif op.name in ("SHORT_BINUNICODE", "BINUNICODE", "UNICODE", "BINUNICODE8"):
+                strings.append(arg)
+            elif op.name == "STACK_GLOBAL" and len(strings) >= 2:
+                mods.add(str(strings[-2]).split(".")[0])
+    return mods
+
+
 def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
                     gold_path: Path = GOLD_DIR / "hourly_features.parquet") -> dict:
     import joblib
@@ -104,6 +126,11 @@ def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
             if e["model"] == "persistence" or row is None:
                 continue
             try:
+                undeclared = pickle_modules(candidate_dir / e["artifact"]) & set(UNDECLARED_PICKLE_MODULES)
+                if undeclared:
+                    problems.append(f"{t} h={h}: artifact needs undeclared module(s) {sorted(undeclared)}; "
+                                    "re-save with hazecast.train.save_model")
+                    continue
                 pred = float(joblib.load(candidate_dir / e["artifact"]).predict(row[cols])[0])
                 if not np.isfinite(pred):
                     problems.append(f"{t} h={h}: non-finite prediction")
