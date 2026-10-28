@@ -145,6 +145,7 @@ def run_inference(gold_path=GOLD_DIR / "hourly_features.parquet", models_dir=MOD
             pd.read_parquet(SILVER_DIR / "pm25.parquet"),
             pd.read_parquet(SILVER_DIR / "weather.parquet"),
             pd.read_parquet(SILVER_DIR / "firms_daily.parquet"),
+            pd.read_parquet(SILVER_DIR / "firms_hourly.parquet"),
         )
         gold_path = Path(gold_path)
         gold_path.parent.mkdir(parents=True, exist_ok=True)

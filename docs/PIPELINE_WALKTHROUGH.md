@@ -242,7 +242,7 @@ Verified on 2026-10-25:
 | `ingest/pm25.py` | bronze | `data/raw/pm25/*.csv` | `data/bronze/pm25.parquet` (ts, 5 regions) | parses `d/m/YYYY H:MM`; patches the one known bad timestamp (`2016-04-04 010:00:00`); **drops and logs** any new malformed one (never guesses); keeps the first of duplicate hours |
 | `ingest/firms.py` | bronze | `data/raw/firms/*.csv\|zip` | `data/bronze/firms.parquet` | unzips; archive `type==0` only (drops volcanoes and gas flares; API archive files have no `type` column and are kept as-is); dedupes on lat/lon/date/time; keeps detections inside the Sumatra / Kalimantan boxes |
 | `ingest/weather.py` | bronze | `data/raw/weather/*.csv` | `data/bronze/weather.parquet` (ts, point, wind, dir, rain) | identifies each file's point from the **coordinates inside the file** (not the name), within 0.5°; dedupes overlapping hours (older file wins) |
-| `bronze_to_silver.py` | silver | bronze parquet | `data/silver/pm25.parquet`, `weather.parquet`, `firms_daily.parquet` | puts every series on a complete hourly clock (daily for fires); fills gaps **≤ 3 h** by time interpolation (wind direction is carried forward, because averaging 359° and 1° gives 180°) and marks them `filled`; leaves longer gaps empty; flags runs of ≥ 5 zero-fire days as likely satellite gaps (`data_gap`), **never filled** |
+| `bronze_to_silver.py` | silver | bronze parquet | `data/silver/pm25.parquet`, `weather.parquet`, `firms_daily.parquet`, `firms_hourly.parquet` | puts every series on a complete hourly clock (fires: daily counts, and hourly counts by detection time that stop 15 h after the latest detection); fills gaps **≤ 3 h** by time interpolation (wind direction is carried forward, because averaging 359° and 1° gives 180°) and marks them `filled`; leaves longer gaps empty; flags runs of ≥ 5 zero-fire days as likely satellite gaps (`data_gap`), **never filled** |
 | `data_quality.py` | report | raw + silver | `reports/data_quality/{bronze_fixes,silver_gaps,quality_checks}.csv` | recounts every fix by re-applying the same rules, so the counts always match the pipeline; 7 pass/fail checks |
 
 Counts from the real data (`reports/data_quality/*.csv`):
@@ -265,7 +265,7 @@ days; next-day model).
 
 | Group | Features (hourly table) | Leak-free rule |
 |---|---|---|
-| Fire hotspots (22) | `fire_{sumatra,kalimantan}_lag{0..3}`, `_roll{3,7}`, `_log_lag0`, totals, `fire_data_gap_recent` | daily counts are **shifted one day** before being spread over the hours: at any hour of day D the model sees D−1's complete count, because a satellite day is only complete after it ends |
+| Fire hotspots (22) | `fire_{sumatra,kalimantan}_lag{0..3}`, `_roll{3,7}`, `_log_lag0`, totals, `fire_data_gap_recent` | **rolling windows on detection times** (§2.7): `lag0` = detections in the 24 h ending 3 full hours before the hour (FIRMS delivery time), `lag1`–`lag3` the 24 h blocks before, `roll3`/`roll7` 72 h / 168 h. Each row only uses detections already delivered at its hour |
 | Weather (25) | `wind_speed_*`, `wind_dir_*`, `rain_*_mm`, `rain_*_roll{3h,24h}` at 5 points | trailing windows only |
 | Upwind (3) | `upwind_{sumatra,kalimantan,total}` = cos(wind direction − bearing from the province to Singapore), clipped at 0, × 7-day fire total | uses current-hour wind and lagged fires |
 | PM2.5 now (6) | `now_{north,...,central,national}` | the reading at the forecast origin |
@@ -285,6 +285,39 @@ by < 1 pp. The list is `config.SELECTED_FEATURES_HOURLY`, applied by both
 kept the data team's filter, which the model branch had dropped). The
 model trained here on the 36 matches the model team's 56-feature holdout
 numbers: central +6 h MAE 7.78 / F2 0.69, against their 7.80 / 0.69.
+
+### 2.7 Fire timing: how a live check found a leak and a daily forecast gap (changed 28 Oct)
+
+**What was found.** On 28 Oct the dashboard was still showing a forecast from Monday night. The hourly runs had fetched everything but skipped the forecast. The original rule gave every hour of Singapore day D the fire count of FIRMS day D−1, and that broke in two ways:
+
+1. **No forecasts from midnight until early afternoon.** FIRMS dates detections by UTC day. The code only created "today" once today had at least one detection, which arrives after the first satellite pass around midday. Until then no hour had fire features, so the freshness gate correctly refused. (The first live test on 26 Oct ran at 22:39, after that day's detections had arrived, which is why it passed.)
+2. **Look-ahead in training.** Detection times in our data show two passes: afternoon (13:00–15:59 Singapore time) and night (01:00–04:59 the next morning, **51 %** of a UTC day's detections). So a training row at 01:00 used a count that included detections made after it.
+
+**Options tested,** on the 2024–26 holdout (xgboost_q85, flat 0.85, trained on pre-holdout data; `experiments/fire_feature_options.py`, `reports/fire_feature_options.csv`):
+
+| Option | Haze hours caught | False alarms | F2 | MAE | +24 h caught | 00–10 h caught |
+|---|---|---|---|---|---|---|
+| A: old rule (leaky, reference) | 0.692 | 1.6 % | 0.641 | 8.67 | 0.556 | 0.656 |
+| B: as-of FIRMS day (D−1 from 11:00, D−2 before) | 0.639 | 1.6 % | 0.594 | 8.77 | 0.407 | 0.597 |
+| C: B + data-age feature | 0.637 | 1.5 % | 0.596 | 8.69 | 0.397 | 0.597 |
+| D: always D−2 | 0.615 | 1.5 % | 0.578 | 8.85 | 0.374 | 0.570 |
+| **E: rolling windows on detection times (chosen)** | **0.687** | **1.2 %** | **0.656** | **8.55** | **0.580** | **0.652** |
+
+B was the first fix tried. It removed the leak but lost accuracy (F2 0.641 → 0.594): the same column meant "yesterday" in the afternoon and "the day before" in the morning, and the model could not tell which. That weakened what it learned even for afternoon hours, whose inputs were unchanged.
+
+E keeps one meaning at every hour, "fires detected in the latest 24 h that FIRMS has delivered", and needs no data from today. It matches the old recall with fewer false alarms and better F2, MAE and +24 h recall.
+
+**Live edge.** Between passes, "no new detections" is normal; after a missed pass or a stalled feed it is not. Over 12 years the gap between detections was about 11 h (the pass interval), and only 295 gaps exceeded 15 h. Hourly counts are therefore trusted up to **15 h after the latest detection** (`FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION`). Beyond that the features are empty and the forecast gate refuses, so an outage is never read as "no fires". Gaps inside the history keep the existing zero-plus-flag treatment.
+
+**Result.** On 28 Oct at 13:57 the newest forecastable hour became 13:00 (1 h old) instead of 23:00 the previous night. `tests/test_fire_asof.py` checks:
+- no row uses a detection before it was delivered (recomputed independently, row by row);
+- a detection enters `lag0` exactly 4 h after its hour and stays for 24 h;
+- the whole morning is forecastable;
+- a silent feed blocks forecasts.
+
+Two of these tests fail on the old rule, as they should.
+
+**Not changed:** the daily table (next-day product), which still uses calendar-day counts. Its 23:30 forecast for day D uses day D's count, which is not complete until the next morning. That is the same look-ahead issue, open for the daily product.
 
 ---
 

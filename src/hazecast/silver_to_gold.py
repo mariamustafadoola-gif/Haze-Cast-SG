@@ -17,7 +17,8 @@ import pandas as pd
 from hazecast.config import (
     SILVER_DIR, GOLD_DIR, SG_REGIONS, WEATHER_POINTS, FIRE_REGIONS,
     HOTSPOT_LAGS, ROLLING_WINDOWS, FORECAST_HORIZON_DAYS,
-    FORECAST_HORIZON_HOURS, HOURLY_RAIN_ROLLING_WINDOWS,
+    FORECAST_HORIZON_HOURS, HOURLY_RAIN_ROLLING_WINDOWS, FIRE_DAY_AVAILABLE_HOUR_SGT,
+    FIRE_LATENCY_HOURS,
 )
 
 log = logging.getLogger(__name__)
@@ -171,20 +172,50 @@ def _hourly_pm25(pm25_silver: pd.DataFrame) -> pd.DataFrame:
     return pm25_silver[["ts"] + SG_REGIONS + ["national_mean"]].copy()
 
 
-def _fire_features_hourly(firms_daily: pd.DataFrame) -> pd.DataFrame:
-    """FIRMS/VIIRS is a satellite-pass source (~1-2 overpasses/day/location)
-    -- there is no genuine intraday refresh of fire activity to build, and
-    a calendar day's own detections aren't fully in until that day is over.
-    So every hour of day D gets day D-1's fully-finalized fire features
-    (the same lag/roll features _fire_features already builds, shifted
-    forward one full day before being broadcast across D's 24 hours) --
-    never day D's own, still-accumulating count. This is the honest
-    resolution of this input, not an hourly one dressed up as if it were.
+def _fire_features_hourly(firms_hourly: pd.DataFrame, firms_daily: pd.DataFrame) -> pd.DataFrame:
+    """Hourly fire features from detection timestamps, using only detections delivered
+    by each hour (see config.FIRE_LATENCY_HOURS):
+
+      fire_<r>_lag0      detections in the 24 h ending FIRE_LATENCY_HOURS full hours before the hour
+      fire_<r>_lag1..3   the 24 h blocks before that
+      fire_<r>_roll3/7   the 72 h / 168 h ending at the same point
+      fire_<r>_log_lag0  log1p(lag0)
+      fire_data_gap_recent  the daily satellite-gap flag, from the latest FIRMS day
+                            complete by the hour (fire_day_for_hour)
+
+    Names match the daily table, so SELECTED_FEATURES_HOURLY, the models and the
+    monitors are unchanged; "lag0" now means "the latest 24 h available".
+
+    History: the first version gave every hour of Singapore day D the features of FIRMS
+    (UTC) day D-1. Live, day D's rows only appeared after D's first detection (around
+    midday), so no forecast could be issued from midnight until then; and in training,
+    hours 00:00-10:59 used counts including the night pass at 01:00-04:59 SGT, i.e.
+    detections made after the hour. A day-based as-of version fixed both but made a
+    column's age depend on the hour and lost accuracy (holdout F2 0.594 vs 0.641); these
+    rolling windows matched the old recall with fewer false alarms (F2 0.659).
     """
-    daily = _fire_features(firms_daily).set_index("date")
-    shifted = daily.shift(1)
-    shifted.index.name = "date"
-    return shifted.reset_index()
+    c = firms_hourly.set_index("ts").sort_index()
+    gap = FIRE_LATENCY_HOURS + 1          # whole hourly buckets fully delivered by the hour
+    out = pd.DataFrame(index=c.index)
+    for region in ["sumatra", "kalimantan", "total"]:
+        day = c[region].rolling(24, min_periods=24).sum()
+        for lag in HOTSPOT_LAGS:
+            out[f"fire_{region}_lag{lag}"] = day.shift(gap + 24 * lag)
+        for w in ROLLING_WINDOWS:
+            out[f"fire_{region}_roll{w}"] = c[region].rolling(24 * w, min_periods=24 * w).sum().shift(gap)
+        out[f"fire_{region}_log_lag0"] = np.log1p(out[f"fire_{region}_lag0"])
+    out.index.name = "ts"
+    out = out.reset_index()
+    daily = _fire_features(firms_daily)[["date", "fire_data_gap_recent"]].copy()
+    daily["date"] = pd.to_datetime(daily["date"])
+    out["fire_date"] = fire_day_for_hour(out["ts"])
+    out = out.merge(daily.rename(columns={"date": "fire_date"}), on="fire_date", how="left")
+    return out.drop(columns="fire_date")
+
+
+def fire_day_for_hour(ts: pd.Series) -> pd.Series:
+    """The latest FIRMS (UTC) day whose detections are complete at each Singapore hour."""
+    return (ts - pd.Timedelta(hours=FIRE_DAY_AVAILABLE_HOUR_SGT)).dt.floor("D") - pd.Timedelta(days=1)
 
 
 def _weather_features_hourly(weather_silver: pd.DataFrame) -> pd.DataFrame:
@@ -233,18 +264,18 @@ def build_gold_hourly(
     pm25_silver: pd.DataFrame,
     weather_silver_df: pd.DataFrame,
     firms_daily: pd.DataFrame,
+    firms_hourly: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Hourly counterpart to build_gold(). One row per hour (Singapore
     time). Labels are FORECAST_HORIZON_HOURS ahead, not FORECAST_HORIZON_DAYS.
     """
+    if firms_hourly is None:
+        firms_hourly = pd.read_parquet(SILVER_DIR / "firms_hourly.parquet")
     pm25 = _hourly_pm25(pm25_silver)
-    fire = _fire_features_hourly(firms_daily)
+    fire = _fire_features_hourly(firms_hourly, firms_daily)
     weather = _weather_features_hourly(weather_silver_df)
 
-    pm25["date"] = pm25["ts"].dt.floor("D")
-    fire["date"] = pd.to_datetime(fire["date"])
-
-    gold = pm25.merge(fire, on="date", how="left").merge(weather, on="ts", how="left")
+    gold = pm25.merge(fire, on="ts", how="left").merge(weather, on="ts", how="left")
     gold = pd.concat([gold, _upwind_features_hourly(gold)], axis=1)
 
     # Persistence features: this hour's own reading.
@@ -256,7 +287,7 @@ def build_gold_hourly(
     for r in SG_REGIONS + ["national_mean"]:
         gold[f"label_{r}"] = gold[r].shift(-h)
 
-    gold = gold.drop(columns=SG_REGIONS + ["national_mean", "date"])
+    gold = gold.drop(columns=SG_REGIONS + ["national_mean"])
     gold = gold.rename(columns={
         "label_national_mean": "label_national", "now_national_mean": "now_national", "ts": "date",
     })
@@ -284,7 +315,7 @@ if __name__ == "__main__":
     )
 
     # Also build the hourly table (the team's main forecast target).
-    gold_h = build_gold_hourly(pm25, weather, firms)
+    gold_h = build_gold_hourly(pm25, weather, firms, pd.read_parquet(SILVER_DIR / "firms_hourly.parquet"))
     path_h = write_gold_hourly(gold_h)
     log.info(
         "gold (hourly): %d rows, %d columns, %s to %s -> %s",

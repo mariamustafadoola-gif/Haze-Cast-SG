@@ -9,7 +9,7 @@ import pandas as pd
 
 from hazecast.config import SELECTED_FEATURES_HOURLY, SELECTED_FEATURES_DAILY, SG_REGIONS
 from hazecast.silver_to_gold import build_gold, build_gold_hourly
-from hazecast.bronze_to_silver import pm25_silver, weather_silver, firms_daily_silver
+from hazecast.bronze_to_silver import pm25_silver, weather_silver, firms_daily_silver, firms_hourly_silver
 from tests.test_pipeline_smoke import pm25_bronze, weather_bronze, firms_bronze  # noqa: F401 (fixtures)
 
 
@@ -17,7 +17,8 @@ def _silver(pm25_bronze, weather_bronze, firms_bronze, tmp_path):
     paths = [tmp_path / f for f in ("pm25.parquet", "weather.parquet", "firms.parquet")]
     for df, p in zip((pm25_bronze, weather_bronze, firms_bronze), paths):
         df.to_parquet(p, index=False)
-    return pm25_silver(bronze_path=paths[0]), weather_silver(bronze_path=paths[1]), firms_daily_silver(bronze_path=paths[2])
+    return (pm25_silver(bronze_path=paths[0]), weather_silver(bronze_path=paths[1]),
+            firms_daily_silver(bronze_path=paths[2]), firms_hourly_silver(bronze_path=paths[2]))
 
 
 def test_lists_have_no_duplicates_or_labels():
@@ -33,8 +34,8 @@ def test_persistence_features_are_always_kept():
 
 
 def test_every_selected_feature_exists_in_gold(pm25_bronze, weather_bronze, firms_bronze, tmp_path):
-    pm25_s, weather_s, firms_s = _silver(pm25_bronze, weather_bronze, firms_bronze, tmp_path)
-    hourly_cols = set(build_gold_hourly(pm25_s, weather_s, firms_s).columns)
+    pm25_s, weather_s, firms_s, firms_h = _silver(pm25_bronze, weather_bronze, firms_bronze, tmp_path)
+    hourly_cols = set(build_gold_hourly(pm25_s, weather_s, firms_s, firms_h).columns)
     daily_cols = set(build_gold(pm25_s, weather_s, firms_s).columns)
     assert set(SELECTED_FEATURES_HOURLY) <= hourly_cols, set(SELECTED_FEATURES_HOURLY) - hourly_cols
     assert set(SELECTED_FEATURES_DAILY) <= daily_cols, set(SELECTED_FEATURES_DAILY) - daily_cols

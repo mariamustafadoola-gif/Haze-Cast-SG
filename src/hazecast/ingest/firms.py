@@ -59,8 +59,8 @@ def load_firms_bronze(raw_dir: Path = RAW_DIR / "firms") -> pd.DataFrame:
     """Load every FIRMS CSV (archive + nrt, any number of requests) into
     one long bronze frame, filtered to the Sumatra/Kalimantan boxes.
 
-    Returns columns: date (datetime.date), latitude, longitude,
-    confidence, frp, daynight, region.
+    Returns columns: date (datetime.date, UTC day), ts (detection time,
+    Singapore, tz-naive), latitude, longitude, confidence, frp, daynight, region.
     """
     _extract_zips(raw_dir)
     archive_files = sorted(glob.glob(str(raw_dir / "fire_archive_*.csv")))
@@ -90,6 +90,11 @@ def load_firms_bronze(raw_dir: Path = RAW_DIR / "firms") -> pd.DataFrame:
         log.info("Dropped %d exact-duplicate detections", before - len(out))
 
     out["date"] = pd.to_datetime(out["acq_date"]).dt.date
+    # Detection time in Singapore time (FIRMS acq_date/acq_time are UTC, acq_time is HHMM).
+    # The hourly fire features are rolling windows on this timestamp.
+    hhmm = out["acq_time"].astype(str).str.zfill(4)
+    out["ts"] = (pd.to_datetime(out["acq_date"]) + pd.to_timedelta(hhmm.str[:2].astype(int), unit="h")
+                 + pd.to_timedelta(hhmm.str[2:].astype(int), unit="m") + pd.Timedelta(hours=8))
     out["region"] = _tag_region(out)
     out = out[out["region"] != "other"]
     # lat/lon are kept for potential future wind-weighting; only the raw

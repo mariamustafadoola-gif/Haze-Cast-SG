@@ -107,6 +107,25 @@ FORECAST_HORIZON_HOURS = 1
 # grain; see the data-staleness note on _fire_features_hourly.
 HOURLY_RAIN_ROLLING_WINDOWS = [3, 24]
 
+# Hourly fire features are rolling windows on detection timestamps: at hour t,
+# fire_<region>_lag0 = detections in the 24 h ending FIRE_LATENCY_HOURS full hours before t,
+# lag1..lag3 the 24 h blocks before that, roll3 / roll7 the 72 h / 168 h ending at the same
+# point. Every row only uses detections that had been delivered by its hour (no look-ahead),
+# the meaning is the same at every hour, and a forecast never waits for "today's" first
+# detection. Chosen over day-based alternatives on the 2024-26 holdout (see
+# docs/PIPELINE_WALKTHROUGH.md section 2.6): same haze recall as the old (leaky) rule,
+# fewer false alarms, better F2 and MAE.
+FIRE_LATENCY_HOURS = 3                       # FIRMS near-real-time delivery: within ~3 h of the pass
+# Hourly counts are trusted up to this long after the latest detection. Passes are ~11 h apart
+# (afternoon 13:00-15:59 SGT, night 01:00-04:59 SGT); a longer silence means a missing pass or a
+# stalled feed, so the features are left empty (the forecast gate refuses) rather than reading an
+# outage as "no fires". 15 h = one pass interval + ~3 h delivery margin; in 12 years of data,
+# silences > 15 h occurred 295 times vs 298 for > 13 h, so the margin costs no outage detection.
+FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION = 15
+# FIRMS dates detections by UTC day (ends 08:00 SGT); a day's count is complete from 11:00 SGT
+# the next day. Used for the day-based satellite-gap flag in the hourly table.
+FIRE_DAY_AVAILABLE_HOUR_SGT = 11
+
 # ---------------------------------------------------------------------------
 # Hourly multi-horizon deliverable (6/12/24h ahead, refreshed hourly).
 # Active hourly models are now selected by forward validation. Historical

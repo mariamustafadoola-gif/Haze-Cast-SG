@@ -29,9 +29,11 @@ def run(days: int = 30, fetch: bool = True) -> pd.DataFrame:
     weather.write_bronze(weather.load_weather_bronze())
     firms.write_bronze(firms.load_firms_bronze())
     pm, we, fi = b2s.pm25_silver(), b2s.weather_silver(), b2s.firms_daily_silver()
+    fh = b2s.firms_hourly_silver()
     b2s.write_silver(pm, "pm25"); b2s.write_silver(we, "weather"); b2s.write_silver(fi, "firms_daily")
+    b2s.write_silver(fh, "firms_hourly")
     s2g.write_gold(s2g.build_gold(pm, we, fi))
-    gold = s2g.build_gold_hourly(pm, we, fi)
+    gold = s2g.build_gold_hourly(pm, we, fi, fh)
     s2g.write_gold_hourly(gold)
     data_quality.write_reports()
     return gold

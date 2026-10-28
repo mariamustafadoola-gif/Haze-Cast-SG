@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from hazecast.config import BRONZE_DIR, SILVER_DIR, SG_REGIONS, MAX_FILL_HOURS
+from hazecast.config import BRONZE_DIR, SILVER_DIR, SG_REGIONS, MAX_FILL_HOURS, FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION
 
 log = logging.getLogger(__name__)
 
@@ -106,6 +106,31 @@ def firms_daily_silver(bronze_path: Path = BRONZE_DIR / "firms.parquet") -> pd.D
     run_len = is_zero.groupby(run_id).transform("sum")
     counts["data_gap"] = is_zero & (run_len >= 5)
 
+    return counts.reset_index()
+
+
+def firms_hourly_silver(bronze_path: Path = BRONZE_DIR / "firms.parquet") -> pd.DataFrame:
+    """Detection-level FIRMS bronze -> detections per hour (Singapore time) per region.
+
+    Hours without a detection are 0 (no satellite pass, or no fire). The grid ends
+    FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION after the latest detection: passes are ~11 h
+    apart, so a longer silence means a missing pass or a stalled feed, and counts after
+    that are unknown (left out, so the hourly features are empty and no forecast is
+    issued from them). Longer gaps inside the history stay as zeros and are covered by
+    the daily data_gap flag, as in firms_daily_silver.
+    """
+    df = pd.read_parquet(bronze_path)
+    if "ts" not in df.columns:
+        raise ValueError(f"{bronze_path} has no detection timestamps; re-run hazecast.ingest.firms")
+    counts = df.groupby([df["ts"].dt.floor("h"), "region"]).size().unstack(fill_value=0)
+    end = counts.index.max() + pd.Timedelta(hours=FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION)
+    counts = counts.reindex(pd.date_range(counts.index.min(), end, freq="h"), fill_value=0)
+    for region in ["sumatra", "kalimantan"]:
+        if region not in counts.columns:
+            counts[region] = 0
+    counts = counts[["sumatra", "kalimantan"]].copy()
+    counts["total"] = counts.sum(axis=1)
+    counts.index.name = "ts"
     return counts.reset_index()
 
 

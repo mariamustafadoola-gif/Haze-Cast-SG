@@ -46,6 +46,7 @@ def firms_bronze():
             rows.append({
                 "latitude": lat, "longitude": lon, "date": day5.date(),
                 "confidence": "n", "frp": 5.0, "daynight": "D", "region": region,
+                "ts": day5 + pd.Timedelta(hours=14),
             })
     return pd.DataFrame(rows)
 

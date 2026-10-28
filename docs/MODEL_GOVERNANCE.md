@@ -140,4 +140,6 @@ frozen unless they fix a model-quality alert.
 - Bias here means *regional and time-of-day* disparity in forecast quality. No protected attributes exist in this data. Regions are the closest analogue to a "facet": a model that under-warns one part of the island is the harm to watch for.
 - Model-quality monitoring is only as complete as NEA's published actuals. Hours NEA has not published stay "pending" and are not scored.
 - Without `FIRMS_MAP_KEY`, fire features stop updating, so the freshness gate stops issuing forecasts and the monitor reports `fix_data` (verified in Airflow). The key is required for live operation.
+- Fire features use only detections FIRMS has delivered (rolling windows ending 3 h before each hour), and are left empty more than 15 h after the latest detection, so a FIRMS outage pauses forecasts rather than being read as "no fires" (walkthrough §2.7).
+- The daily (next-day) product still uses calendar-day fire counts, including the current day's incomplete count at 23:30. This look-ahead issue is open for that product only.
 - Thresholds are calibrated on one replay (one out-of-time haze season). Revisit them after the first live haze season; the drift limits are recomputed from the training data with every new baseline.
