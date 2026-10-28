@@ -20,8 +20,11 @@ Promotion gate (all must pass):
                    Not MAE: the q85 models are upward-biased by design and never beat
                    persistence on MAE (0 of 18 groups on the 2024-26 holdout). Persistence is
                    a floor, not a target: it cannot forecast the onset of an episode at all.
-  3. no regression vs the champion's recorded holdout, judged on the selection
-     objective (F2), not MAE:
+  3. no regression vs the champion, judged on the selection objective (F2), not MAE,
+     like-for-like: the champion's model choices are refitted on the challenger's own
+     pre-holdout rows with the current features and scored on the same holdout (its
+     recorded scores came from another window and, after the fire-feature fix, other
+     features; they are only used when the holdout has no haze hours to judge F2 on):
        - F2 within PROMOTION_F2_REGRESSION of the champion's in at least half the groups;
        - no group whose F2 drops by more than PROMOTION_F2_SEVERE_DROP (such a challenger
          goes to a person, who may --force it with a recorded reason);
@@ -30,6 +33,8 @@ Promotion gate (all must pass):
      Why: an MAE rule (the first version) rejected the LOSO-tuned challenger even though
      it improved F2 in 13 of 18 groups, because a higher quantile forecasts higher by
      design; and it would not have singled out the one real regression (west +6 h).
+A forced promotion (`--force`) requires a written `--reason`, stored in the
+promotion log and in the published manifest.
 Promotion copies the challenger's artifacts, writes the manifest last (so
 inference never sees a half-published model), archives the old manifest under
 history/ and appends to promotion_log.jsonl. Artifacts have unique names and
@@ -101,6 +106,35 @@ def pickle_modules(path: Path) -> set[str]:
     return mods
 
 
+def _paired_champion_scores(gold: pd.DataFrame, champion: dict, candidate: dict) -> dict:
+    """Refit the champion's chosen model per group on the challenger's pre-holdout rows (current
+    features) and score it on the challenger's holdout. Returns {"t|h": metrics} for groups whose
+    holdout has elevated hours; the champion's production artifacts are never used (they were
+    refitted on all labels, holdout included)."""
+    import inspect
+    from hazecast.hourly_model import _labelled, _feature_columns, _complete, _before, _fit, _predict
+    from hazecast.train import _metrics
+    takes_horizon = "horizon" in inspect.signature(_fit).parameters   # tuned branch passes the horizon
+    out = {}
+    for h in HORIZONS:
+        lab = _labelled(gold, h)
+        cols = candidate["feature_columns"]
+        for t in TARGETS:
+            name = ((champion.get("models", {}).get(str(h), {}).get(t)) or {}).get("model")
+            entry = candidate["models"][str(h)][t]
+            if not name:
+                continue
+            start = pd.Timestamp(entry["test_start"])
+            start = start.tz_localize(gold.date.dt.tz) if start.tzinfo is None else start.tz_convert(gold.date.dt.tz)
+            rows = _complete(lab, cols, t, h)
+            train, test = _before(rows, start, h), rows.loc[rows.date >= start]
+            if test.empty or (test[f"label_{t}"] >= float(candidate["threshold"])).sum() == 0:
+                continue
+            est = _fit(name, train, cols, t, h) if takes_horizon else _fit(name, train, cols, t)
+            out[f"{t}|{h}"] = dict(model=name, **_metrics(test[f"label_{t}"], _predict(est, test, cols, t)))
+    return out
+
+
 def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
                     gold_path: Path = GOLD_DIR / "hourly_features.parquet") -> dict:
     import joblib
@@ -144,23 +178,28 @@ def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
 
     # 2 + 3. skill vs persistence and regression vs champion
     champion = _load(champion_dir / MANIFEST) if (Path(champion_dir) / MANIFEST).exists() else None
+    paired = _paired_champion_scores(gold, champion, manifest) if champion else {}
     for h in HORIZONS:
         for t in TARGETS:
             e = manifest["models"][str(h)][t]
             test = e.get("final_test") or {}
             mae, f2 = test.get("mae"), test.get("f2")
             pers = _persistence_holdout(gold, t, h, e["test_start"], float(manifest["threshold"]))
-            champ = (((champion or {}).get("models", {}).get(str(h), {}).get(t) or {}).get("final_test") or {})
+            recorded = (((champion or {}).get("models", {}).get(str(h), {}).get(t) or {}).get("final_test") or {})
+            champ = paired.get(f"{t}|{h}") or recorded
             champ_mae, champ_f2 = champ.get("mae"), champ.get("f2")
             groups[f"{t}|{h}"] = dict(
                 model=e["model"], holdout_mae=mae, persistence_mae=pers["mae"], holdout_f2=f2, persistence_f2=pers["f2"],
                 f2_vs_persistence=(f2 - pers["f2"]) if f2 is not None and pers["f2"] is not None else None,
                 champion_mae=champ_mae, champion_f2=champ_f2,
+                champion_basis="refitted on this holdout" if f"{t}|{h}" in paired else "recorded",
+                champion_f2_recorded=recorded.get("f2"),
                 mae_ratio=(mae / champ_mae) if mae is not None and champ_mae else None,
                 f2_change=(f2 - champ_f2) if f2 is not None and champ_f2 is not None else None)
     diffs = [g["f2_vs_persistence"] for g in groups.values() if g["f2_vs_persistence"] is not None]
     share = float(np.mean([d >= -C.PROMOTION_F2_TOLERANCE for d in diffs])) if diffs else 1.0
     checks["skill"] = dict(passed=share >= C.PROMOTION_MIN_SKILL_TARGETS, share_within_f2_tolerance=share,
+                           groups_beating_persistence=sum(d > 0 for d in diffs),
                            groups_with_haze=len(diffs), tolerance=C.PROMOTION_F2_TOLERANCE,
                            required=C.PROMOTION_MIN_SKILL_TARGETS,
                            note="no haze hours in holdout: skill not judged" if not diffs else None)
@@ -176,6 +215,7 @@ def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
             passed=within >= 0.5 and not severe and not blown, share_f2_within_tolerance=within,
             f2_tolerance=C.PROMOTION_F2_REGRESSION, severe_f2_drops=severe, mae_blowups=blown,
             groups_f2_improved=sum(d > 0 for d in f2_changes.values()), groups_compared=len(f2_changes),
+            champion_compared_like_for_like=len(paired),
             note=("needs human review: severe F2 drop in " + ", ".join(severe)) if severe else None)
     return dict(passed=all(c["passed"] for c in checks.values()), checks=checks, groups=groups)
 
@@ -206,10 +246,14 @@ def _publish(manifest: dict, production_dir: Path, **provenance) -> None:
 
 
 def promote(candidate_dir: Path, production_dir: Path = PRODUCTION_DIR,
-            gold_path: Path = GOLD_DIR / "hourly_features.parquet", force: bool = False) -> dict:
+            gold_path: Path = GOLD_DIR / "hourly_features.parquet", force: bool = False,
+            reason: str | None = None) -> dict:
     candidate_dir, production_dir = Path(candidate_dir), Path(production_dir)
+    if force and not (reason and reason.strip()):
+        raise ValueError("A forced promotion needs a written reason (--reason)")
     result = check_candidate(candidate_dir, production_dir, gold_path)
-    result.update(candidate=str(candidate_dir), decided_at=_now(), forced=force and not result["passed"])
+    result.update(candidate=str(candidate_dir), decided_at=_now(), forced=force and not result["passed"],
+                  reason=reason if force else None)
     if not result["passed"] and not force:
         log.warning("Challenger %s rejected: %s", candidate_dir,
                     {k: v["passed"] for k, v in result["checks"].items()})
@@ -225,7 +269,10 @@ def promote(candidate_dir: Path, production_dir: Path = PRODUCTION_DIR,
     for name in COMPANION_FILES:
         if (candidate_dir / name).exists():
             shutil.copyfile(candidate_dir / name, production_dir / name)
-    _publish(manifest, production_dir, promoted_from=str(candidate_dir), replaced=str(archived) if archived else None)
+    provenance = dict(promoted_from=str(candidate_dir), replaced=str(archived) if archived else None)
+    if result["forced"]:
+        provenance.update(forced_over=[k for k, v in result["checks"].items() if not v["passed"]], forced_reason=reason)
+    _publish(manifest, production_dir, **provenance)
     _log(production_dir, dict(action="promoted", archived=archived, **result))
     log.info("Promoted %s (previous manifest archived to %s)", candidate_dir, archived)
     return dict(promoted=True, archived=str(archived) if archived else None, **result)
@@ -265,13 +312,14 @@ def main():
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("promote")
     p.add_argument("--candidate", type=Path, required=True)
-    p.add_argument("--force", action="store_true", help="promote even if the gate fails (record why!)")
+    p.add_argument("--force", action="store_true", help="promote even if the gate fails (needs --reason)")
+    p.add_argument("--reason", help="why a forced promotion is justified; stored in the log and manifest")
     r = sub.add_parser("rollback")
     r.add_argument("--to", type=Path)
     sub.add_parser("status")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    out = (promote(a.candidate, force=a.force) if a.cmd == "promote"
+    out = (promote(a.candidate, force=a.force, reason=a.reason) if a.cmd == "promote"
            else rollback(a.to) if a.cmd == "rollback" else status())
     print(json.dumps(out, indent=2, default=str))
 

@@ -16,6 +16,8 @@ import numpy as np
 import pandas as pd
 from hazecast.config import (
     USE_SELECTED_FEATURES, SELECTED_FEATURES_HOURLY,
+    SELECTION_DEFAULT_CANDIDATE, SELECTION_SWITCH_CONFIDENCE,
+    SELECTION_BOOTSTRAP_BLOCK_HOURS, SELECTION_BOOTSTRAP_SAMPLES,
     GOLD_DIR, MODELS_DIR, SG_REGIONS, HOURLY_HORIZONS, HOURLY_TIMEZONE,
     PM25_ELEVATED_THRESHOLD, MODEL_CANDIDATES, CV_SPLITS,
     FINAL_TEST_FRACTION, MIN_TRAIN_ROWS, HOURLY_MLFLOW_EXPERIMENT, REPO_ROOT,
@@ -101,6 +103,28 @@ def _predict(model, rows, cols, target):
     return np.maximum(0.0, np.asarray(pred, dtype=float))
 
 
+def switch_confidence(y, dates, p_alt, p_def, *, block_hours=SELECTION_BOOTSTRAP_BLOCK_HOURS,
+                      samples=SELECTION_BOOTSTRAP_SAMPLES, seed=42):
+    """Share of paired block-bootstrap resamples in which p_alt has the higher F2 than p_def.
+
+    Validation rows are resampled in whole blocks (default one week) so the serial
+    dependence of hourly PM2.5, and whole haze episodes, are kept together.
+    """
+    y, p_alt, p_def = (np.asarray(a, dtype=float) for a in (y, p_alt, p_def))
+    t = pd.to_datetime(pd.Series(dates))
+    block = ((t - t.min()) // pd.Timedelta(hours=block_hours)).to_numpy()
+    groups = [np.flatnonzero(block == b) for b in np.unique(block)]
+    rng = np.random.default_rng(seed)
+    wins = valid = 0
+    for _ in range(samples):
+        idx = np.concatenate([groups[i] for i in rng.integers(0, len(groups), len(groups))])
+        a, b = _metrics(y[idx], p_alt[idx])["f2"], _metrics(y[idx], p_def[idx])["f2"]
+        if np.isfinite(a) and np.isfinite(b):
+            valid += 1
+            wins += a > b
+    return wins / valid if valid else 0.0
+
+
 def _setup_mlflow():
     mlflow.set_tracking_uri(os.environ.get("MLFLOW_TRACKING_URI", f"sqlite:///{REPO_ROOT / 'mlflow.db'}"))
     mlflow.set_experiment(HOURLY_MLFLOW_EXPERIMENT)
@@ -134,6 +158,7 @@ def _evaluate(gold, horizon):
             raise ValueError(f"Missing persistence feature now_{target}")
         rows = _complete(gold, cols, target, horizon)
         pooled = {name: ([], []) for name in MODEL_CANDIDATES}
+        pooled_dates = []
         for fold, block in enumerate(blocks[1:], 1):
             start, end = pd.Timestamp(block[0]), pd.Timestamp(block[-1])
             train = _before(rows, start, horizon)
@@ -159,11 +184,22 @@ def _evaluate(gold, horizon):
                     results.append({**params, **metrics})
                 pooled[name][0].extend(valid[f"label_{target}"].tolist())
                 pooled[name][1].extend(pred.tolist())
+            pooled_dates.extend(valid.date.tolist())
         summaries = {n: _metrics(*pair) for n, pair in pooled.items()}
         has_haze = next(iter(summaries.values()))["n_elevated"] > 0
         winner = min(MODEL_CANDIDATES, key=lambda n: (
             (-summaries[n]["f2"], summaries[n]["mae"], summaries[n]["rmse"])
             if has_haze else (summaries[n]["mae"], summaries[n]["rmse"])))
+        stability = None
+        default = SELECTION_DEFAULT_CANDIDATE
+        if has_haze and winner != default and default in pooled:
+            conf = switch_confidence(pooled[winner][0], pooled_dates, pooled[winner][1], pooled[default][1])
+            stability = dict(proposed=winner, default=default, confidence=conf,
+                             required=SELECTION_SWITCH_CONFIDENCE,
+                             kept=winner if conf >= SELECTION_SWITCH_CONFIDENCE else default)
+            log.info("%s h=%d: %s beat %s on pooled F2 in %.0f%% of resamples -> %s", target, horizon,
+                     winner, default, 100 * conf, stability["kept"])
+            winner = stability["kept"]
         for name, metrics in summaries.items():
             results.append(dict(target=target, model=name, split="validation_pooled", **metrics))
         # The latest contiguous block is touched only after selection is fixed.
@@ -176,7 +212,7 @@ def _evaluate(gold, horizon):
         results.append(dict(target=target, model=winner, split="final_test", **holdout))
         selections[target] = dict(model=winner, validation=summaries[winner], final_test=holdout,
                                   selection_rule="f2_then_mae_rmse" if has_haze else "mae_then_rmse_no_positive_support",
-                                  test_start=test_start.isoformat())
+                                  stability=stability, test_start=test_start.isoformat())
     summary = pd.DataFrame(results)
     summary["horizon_hours"] = horizon
     return summary, selections, cols

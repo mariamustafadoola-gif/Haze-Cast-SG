@@ -333,6 +333,19 @@ MIN_TRAIN_ROWS = 100
 # elevated validation observations exist, rank by MAE then RMSE instead.
 MLFLOW_EXPERIMENT = "hazecast-sg-forward"
 
+# Selection stability (hourly). The pooled validation has only ~130-150 elevated hours per
+# group, so small F2 differences between candidates are noise. Twice, a thin validation win
+# switched the west region away from xgboost_q85 (ridge at +6 h by 0.002, random forest at
+# +12 h by 0.038) and the switch then lost out of time (F2 -0.151, -0.104). A non-default
+# winner is now kept only if it beats the default in at least SELECTION_SWITCH_CONFIDENCE of
+# paired block-bootstrap resamples of the validation predictions (whole weeks resampled, so
+# haze episodes stay intact). Measured: west +12 h random forest won 73% of resamples,
+# central +6 h persistence 43% -- neither reliable.
+SELECTION_DEFAULT_CANDIDATE = "xgboost_q85"
+SELECTION_SWITCH_CONFIDENCE = 0.90
+SELECTION_BOOTSTRAP_BLOCK_HOURS = 168
+SELECTION_BOOTSTRAP_SAMPLES = 500
+
 # Active hourly comparison: independent selected model per region/horizon.
 HOURLY_MLFLOW_EXPERIMENT = "hazecast-sg-hourly-forward"
 HOURLY_TIMEZONE = "Asia/Singapore"
