@@ -414,6 +414,33 @@ ATTRIBUTION_TOP_K = 10
 ATTRIBUTION_NDCG_ALERT = 0.90      # SageMaker Clarify's default; a ceiling -- per-model limits are the 1st
                                    # (alert) / 5th (warn) percentile of NDCG over training-period windows
 ATTRIBUTION_SAMPLE_ROWS = 3000
+# Calibration (coverage): share of hours at or below the q85 forecast, pooled over the 6 targets
+# per horizon and week. Per-region weekly coverage is too noisy to alert on (in the replay, a
+# third of normal weeks had 3+ groups outside any useful band); pooled, normal weeks stayed
+# within their 1st-99th percentile band, which the baseline stores from the holdout's quiet weeks.
+COVERAGE_MIN_QUIET_WEEKS = 20      # quiet holdout weeks needed to set the band; fewer -> not judged
+# Persistence: a drift, output-stability, attribution or coverage signal must appear in two
+# consecutive monitoring runs before it asks a person to look or retrains (live: two days).
+# Performance alerts (errors and recall against actuals) and data failures act at once.
+# Haze mode: while any region read >= 56 ug/m3 in the last 24 h, monitoring also runs every
+# 6 h (hazecast_haze_monitoring DAG); retrains are limited to one per RETRAIN_COOLDOWN_DAYS, so
+# a long episode does not retrain daily (the replay recommended retraining 9 weeks running).
+HAZE_ACTIVE_HOURS = 24
+RETRAIN_COOLDOWN_DAYS = 7
+# Scenario retrains (model_monitor.scenario_triggers), besides the monthly schedule:
+PRE_SEASON_RETRAIN = (7, 15)       # (month, day): refresh before the August-October fire season
+POST_EPISODE_QUIET_DAYS = 14       # after an episode the model has not trained on, once this quiet
+# ...and a change in the feature code, feature settings or model libraries (hazecast.provenance).
+# Early life: in its first EARLY_LIFE_DAYS a new champion is compared with the one it replaced
+# on the same hours; MAE above EARLY_LIFE_MAE_RATIO x the previous one's at any horizon, or
+# recall more than RECALL_VS_PERSISTENCE_MARGIN lower (with 12+ haze hours), asks for a review.
+EARLY_LIFE_DAYS = 7
+EARLY_LIFE_MAE_RATIO = 1.25
+# Recent-window gate check: the challenger, refitted without the last RECENT_WINDOW_DAYS, must
+# not fall more than PROMOTION_F2_SEVERE_DROP behind the forecasts actually served in that
+# window (pooled per horizon, only when it holds 12+ haze hours). The holdout is mostly older
+# data; this checks the challenger on the conditions it will meet first.
+RECENT_WINDOW_DAYS = 90
 # Governance
 MAX_MODEL_AGE_DAYS = 35            # scheduled refresh even without drift (monthly retrain + slack)
 # Regression vs the champion is judged on F2 (the selection objective), not MAE: a higher

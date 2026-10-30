@@ -22,7 +22,10 @@ def test_no_import_errors(bag):
 
 
 def test_expected_dags_and_edges(bag):
-    assert set(bag.dag_ids) == {"hazecast_backfill", "hazecast_hourly", "hazecast_monitoring", "hazecast_retrain"}
+    assert set(bag.dag_ids) == {"hazecast_backfill", "hazecast_hourly", "hazecast_monitoring", "hazecast_retrain",
+                                "hazecast_haze_monitoring"}
+    haze = bag.get_dag("hazecast_haze_monitoring")
+    assert haze.get_task("collect_actuals").upstream_task_ids == {"haze_active"}   # stops outside an episode
     hourly = bag.get_dag("hazecast_hourly")
     assert hourly.get_task("run_inference").upstream_task_ids == {"features_fresh"}
     monitoring = bag.get_dag("hazecast_monitoring")

@@ -141,6 +141,20 @@ def dashboards() -> dict:
     return out
 
 
+def haze_active(hours: int | None = None) -> bool:
+    """Is a haze episode under way: did any region read >= the elevated threshold in the last
+    HAZE_ACTIVE_HOURS hours of gold? Gates the 6-hourly haze-mode monitoring."""
+    from hazecast import config as C
+    from hazecast.config import SG_REGIONS
+    hours = hours or C.HAZE_ACTIVE_HOURS
+    cols = [f"now_{r}" for r in SG_REGIONS]
+    gold = pd.read_parquet(GOLD_DIR / "hourly_features.parquet", columns=["date", *cols])
+    recent = gold.loc[pd.to_datetime(gold.date) >= pd.to_datetime(gold.date).max() - pd.Timedelta(hours=hours)]
+    active = bool((recent[cols] >= C.PM25_ELEVATED_THRESHOLD).to_numpy().any())
+    log.info("Haze %s in the last %d h", "active" if active else "not active", hours)
+    return active
+
+
 def choose_branch(action: str) -> str:
     """Map the governance action to the next task id in the monitoring DAG."""
     return {"retrain": "trigger_retrain", "fix_data": "alert_data_failure",

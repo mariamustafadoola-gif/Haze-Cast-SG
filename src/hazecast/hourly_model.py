@@ -251,10 +251,11 @@ def train_final_hourly_models(gold, *, horizons=None, out_dir=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     summary = pd.concat(evaluations, ignore_index=True)
     summary.to_csv(out_dir / "eval_summary.csv", index=False)
+    from hazecast import provenance
     manifest = dict(schema_version=1, pipeline="hourly", horizons_hours=horizons,
                     timezone=HOURLY_TIMEZONE, feature_columns=cols,
                     threshold=PM25_ELEVATED_THRESHOLD,
-                    trained_at=pd.Timestamp.now(tz="UTC").isoformat(), models={})
+                    trained_at=pd.Timestamp.now(tz="UTC").isoformat(), **provenance.record(), models={})
     paths = {}
     for horizon in horizons:
         labelled = _labelled(gold, horizon)

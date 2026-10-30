@@ -146,7 +146,8 @@ def quality(frame: pd.DataFrame) -> dict:
                mean_error=float(err.mean()), n_elevated=int(actual.sum()), tp=tp, fp=fp, fn=fn,
                f2=5 * tp / (5 * tp + 4 * fn + fp) if actual.any() else None,
                recall=tp / actual.sum() if actual.any() else None,
-               flag_rate=float(flagged.mean()), actual_rate=float(actual.mean()))
+               flag_rate=float(flagged.mean()), actual_rate=float(actual.mean()),
+               coverage=float((a <= f).mean()), mean_actual=float(a.mean()))
     if "persistence_pm25" in frame:
         p_mae = float(np.abs(frame["persistence_pm25"].to_numpy(dtype=float) - a).mean())
         p_flag = frame["persistence_pm25"].to_numpy(dtype=float) >= thr
@@ -220,6 +221,24 @@ def drift_null(reference: pd.DataFrame, models: dict, cols: list[str], features:
                       warn=min(C.ATTRIBUTION_NDCG_ALERT, q(v, 0.05) if v else C.ATTRIBUTION_NDCG_ALERT))
               for k, v in ndcg_null.items()},
         n_windows=len(windows))
+
+
+def coverage_band(holdout: pd.DataFrame) -> dict:
+    """Normal range of weekly calibration per horizon: the 1st-99th percentile of the share of hours
+    at or below the forecast, pooled over the targets, in holdout weeks without haze (fewer than
+    MIN_ELEVATED_FOR_RECALL elevated hours). Returns {} when there are too few quiet weeks."""
+    t = pd.to_datetime(holdout["forecast_time"], utc=True).dt.tz_convert(SGT).dt.tz_localize(None)
+    frame = holdout.assign(week=t.dt.to_period("W").dt.start_time,
+                           ok=holdout["actual_pm25"] <= holdout["forecast_pm25"],
+                           el=holdout["actual_pm25"] >= holdout["threshold"])
+    elevated = frame.loc[frame.region == "national"].groupby(["week", "horizon_hours"]).el.sum()
+    weekly = frame.groupby(["week", "horizon_hours"]).ok.mean()
+    quiet = weekly[elevated.reindex(weekly.index, fill_value=0) < C.MIN_ELEVATED_FOR_RECALL]
+    out = {}
+    for h, v in quiet.groupby(level="horizon_hours"):
+        if len(v) >= C.COVERAGE_MIN_QUIET_WEEKS:
+            out[str(int(h))] = dict(low=float(v.quantile(0.01)), high=float(v.quantile(0.99)), n_weeks=len(v))
+    return out
 
 
 def _season_windows(reference: pd.DataFrame, n: int, seed: int) -> dict[str, list[pd.DataFrame]]:
@@ -335,6 +354,7 @@ def build_baseline(reference: pd.DataFrame, models: dict, cols: list[str], *,
     if holdout is not None and not holdout.empty:
         baseline["quality"] = {f"{t}|{int(h)}": quality(g) for (t, h), g in holdout.groupby(["region", "horizon_hours"])}
         baseline["bias"] = _bias_by_region(holdout)
+        baseline["coverage_band"] = coverage_band(holdout)
         baseline["holdout_start"] = str(pd.to_datetime(holdout["forecast_time"], utc=True).min())
     return baseline
 
@@ -546,9 +566,27 @@ def model_quality_monitor(matched: pd.DataFrame, baseline: dict) -> dict:
         q["status"], q["reasons"] = ("alert" if reasons else "ok"), reasons
         n_alert += bool(reasons)
         groups[f"{target}|{int(horizon)}"] = q
+    # Calibration and level, pooled over the targets per horizon. Coverage can be judged every
+    # week, haze or not; the level ratio tells a person whether a high MAE ratio came with a
+    # higher pollution level (a harder week) rather than a worse model.
+    horizons, coverage_out = {}, []
+    for horizon, g in matched.groupby("horizon_hours"):
+        q = quality(g)
+        band = baseline.get("coverage_band", {}).get(str(int(horizon)))
+        base_level = np.mean([b["mean_actual"] for k, b in baseline.get("quality", {}).items()
+                              if k.endswith(f"|{int(horizon)}") and b.get("mean_actual")] or [np.nan])
+        out_of_band = (band is not None and q["n"] >= C.MIN_MATCHED_FOR_QUALITY * len(TARGETS)
+                       and not band["low"] <= q["coverage"] <= band["high"])
+        horizons[str(int(horizon))] = dict(n=q["n"], coverage=q["coverage"], coverage_band=band,
+                                           level_ratio=q["mean_actual"] / base_level if np.isfinite(base_level) else None,
+                                           coverage_status="alert" if out_of_band else "ok" if band else "not_judged")
+        if out_of_band:
+            coverage_out.append(f"+{int(horizon)} h {q['coverage']:.2f} outside {band['low']:.2f}-{band['high']:.2f}")
     return dict(n_matched=len(matched), n_groups=len(groups), n_alert=n_alert, groups=groups,
+                horizons=horizons, coverage_alerts=coverage_out,
                 status="no_data" if matched.empty else
-                "alert" if n_alert >= C.MODEL_QUALITY_ALERT_MIN_GROUPS else "warn" if n_alert else "ok")
+                "alert" if n_alert >= C.MODEL_QUALITY_ALERT_MIN_GROUPS
+                else "warn" if n_alert or coverage_out else "ok")
 
 
 def bias_drift_monitor(matched: pd.DataFrame, baseline: dict) -> dict:
@@ -599,7 +637,21 @@ def attribution_drift_monitor(window: pd.DataFrame, models: dict, cols: list[str
 # ---------------------------------------------------------------------------
 # Governance decision (docs/MODEL_GOVERNANCE.md, section "Retraining triggers")
 # ---------------------------------------------------------------------------
-def governance_decision(results: dict, *, model_published_at=None, now=None) -> dict:
+PERSISTENT_SIGNALS = ("data_drift", "output_stability", "attribution_drift", "coverage")
+COOLDOWN_EXEMPT = ("feature_code_changed", "environment_changed")
+
+
+def governance_decision(results: dict, *, model_published_at=None, now=None, previous_reasons=None,
+                        triggers=(), last_retrain_at=None, early_life=None) -> dict:
+    """One action from the monitor results (docs/MODEL_GOVERNANCE.md §5).
+
+    previous_reasons: the previous run's reasons. When given, a drift, output-stability,
+    attribution or coverage signal only counts if it also appeared in that run (persistence);
+    None keeps the single-run behaviour. triggers: scenario retrains (scenario_triggers).
+    last_retrain_at: when the last retrain was attempted; automatic retrains are held for
+    RETRAIN_COOLDOWN_DAYS after it, except after a change in the feature code or libraries.
+    early_life: a finding of early_life_check, which asks a person to review.
+    """
     dq, mq = results["data_quality"], results["model_quality"]
     bias, attr = results["bias_drift"], results["attribution_drift"]
     reasons = []
@@ -618,35 +670,156 @@ def governance_decision(results: dict, *, model_published_at=None, now=None) -> 
             reasons.append(f"data_pipeline_failure: missing columns {dq['missing_columns']}")
         return dict(action="fix_data", reasons=reasons, model_age_days=age)
     stab = results.get("stability") or dict(status="no_data", n_alert=0)
-    performance = mq["status"] == "alert"
-    drift = dq["n_psi_alert"] >= C.PSI_ALERT_MIN_FEATURES
-    output_shift = stab["status"] == "alert"
-    attribution_shift = attr["status"] == "alert"
+    seen_before = None if previous_reasons is None else {r.split(":")[0] for r in previous_reasons}
+
+    def signal(name: str, active: bool, text: str) -> bool:
+        """Record a persistent signal; it counts only if the previous run had it too."""
+        if not active:
+            return False
+        confirmed = seen_before is None or name in seen_before
+        reasons.append(f"{name}: {text}" + ("" if confirmed else " (first occurrence; acted on if it repeats)"))
+        return confirmed
+
     season = f" ({dq['season']})" if dq.get("season") else ""
+    other_alert = False
+    performance = mq["status"] == "alert"
     if performance:
-        reasons.append(f"model_quality: {mq['n_alert']} of {mq['n_groups']} target/horizon groups in alert")
-    if drift:
-        reasons.append(f"data_drift: {dq['n_psi_alert']} features beyond their calibrated CSI limit{season}")
-    if output_shift:
-        reasons.append(f"output_stability: forecasts of {stab['n_alert']} models beyond their calibrated PSI limit{season}")
-    if attribution_shift:
-        reasons.append(f"attribution_drift: {attr['n_alert']} models below their calibrated NDCG limit")
-    if dq["status"] == "alert" and not drift:
+        levels = [h["level_ratio"] for h in mq.get("horizons", {}).values() if h.get("level_ratio")]
+        level = f"; pollution level {max(levels):.1f}x the holdout average" if levels and max(levels) >= 1.5 else ""
+        reasons.append(f"model_quality: {mq['n_alert']} of {mq['n_groups']} target/horizon groups in alert{level}")
+    drift = signal("data_drift", dq["n_psi_alert"] >= C.PSI_ALERT_MIN_FEATURES,
+                   f"{dq['n_psi_alert']} features beyond their calibrated CSI and PSI limits{season}")
+    output_shift = signal("output_stability", stab["status"] == "alert",
+                          f"forecasts of {stab.get('n_alert', 0)} models beyond their calibrated PSI limit{season}")
+    attribution_shift = signal("attribution_drift", attr.get("status") == "alert",
+                               f"{attr.get('n_alert', 0)} models below their calibrated NDCG limit")
+    coverage = signal("coverage", bool(mq.get("coverage_alerts")),
+                      "calibration outside its normal weekly range: " + "; ".join(mq.get("coverage_alerts", [])))
+    if dq["status"] == "alert" and dq["n_psi_alert"] < C.PSI_ALERT_MIN_FEATURES:
         reasons.append(f"data_quality: {dq['n_feature_alert']} features out of range or missing more often")
-    if bias["status"] == "alert":
+        other_alert = True
+    if bias.get("status") == "alert":
         reasons.append("bias_drift: " + ", ".join(bias["reasons"][:5]))
-    if age is not None and age > C.MAX_MODEL_AGE_DAYS:
+        other_alert = True
+    aged = age is not None and age > C.MAX_MODEL_AGE_DAYS
+    if aged:
         reasons.append(f"model_age: {age:.0f} days > {C.MAX_MODEL_AGE_DAYS}")
-    # Retrain on evidence the model is wrong (performance), on input drift or unstable output
-    # that has also changed what the model relies on, or on age. Drift, output instability or
-    # bias alone -> a human looks first.
-    retrain = (performance or ((drift or output_shift) and attribution_shift)
-               or (age is not None and age > C.MAX_MODEL_AGE_DAYS))
-    # Warnings are shown on the dashboard but do not page anyone (alarm fatigue): only
-    # an alert in some monitor asks a human to look.
-    attention = reasons or any((results.get(m) or {}).get("status") == "alert" for m in MONITORS)
+    reasons.extend(triggers)
+    if early_life:
+        reasons.append(early_life)
+        other_alert = True
+    # Retrain on evidence the model is wrong (performance or calibration), on input drift or
+    # unstable output that has also changed what the model relies on, on age, or on a scenario
+    # (before the fire season, after an episode, after a change in the feature path).
+    # Drift, output instability, attribution or bias alone -> a person looks first.
+    retrain = (performance or coverage or ((drift or output_shift) and attribution_shift)
+               or aged or bool(triggers))
+    exempt = any(t.startswith(COOLDOWN_EXEMPT) for t in triggers)
+    if retrain and not exempt and last_retrain_at is not None and now is not None:
+        since = (timestamp(now) - timestamp(last_retrain_at)).total_seconds() / 86400
+        if since < C.RETRAIN_COOLDOWN_DAYS:
+            reasons.append(f"retrain_cooldown: last retrain {since:.1f} days ago; the next is allowed after "
+                           f"{C.RETRAIN_COOLDOWN_DAYS} days")
+            retrain, other_alert = False, True
+    # Warnings and unconfirmed signals stay on the dashboard but do not page anyone (alarm fatigue).
+    attention = other_alert or drift or output_shift or attribution_shift or coverage or performance
     return dict(action="retrain" if retrain else "investigate" if attention else "none",
                 reasons=reasons, model_age_days=age)
+
+
+def scenario_triggers(now, gold: pd.DataFrame, manifest: dict) -> list[str]:
+    """Retrains no threshold would ask for (docs/MODEL_GOVERNANCE.md §5): before the fire season,
+    after a haze episode the model has not trained on, and after a change in the feature code,
+    feature settings or model libraries."""
+    from hazecast import provenance
+    out = []
+    now_sgt = pd.Timestamp(timestamp(now)).tz_convert(SGT)
+    trained = pd.Timestamp(manifest.get("trained_at") or manifest.get("published_at") or now_sgt)
+    trained = trained.tz_localize("UTC") if trained.tzinfo is None else trained
+    month, day = C.PRE_SEASON_RETRAIN
+    season_start = pd.Timestamp(now_sgt.year, month, day, tz=SGT)
+    if season_start <= now_sgt < season_start + pd.Timedelta(days=31) and trained < season_start:
+        out.append("scheduled_pre_season: refresh before the August-October fire season")
+    label_ends = [pd.Timestamp(e["training_label_end"]) for es in manifest.get("models", {}).values()
+                  for e in es.values() if e.get("training_label_end")]
+    if label_ends and "date" in gold:
+        seen_to = max(label_ends)
+        recent = gold.loc[gold.date > seen_to.tz_convert(gold.date.dt.tz)]
+        hot = recent.loc[(recent[[f"now_{r}" for r in SG_REGIONS if f"now_{r}" in recent]]
+                          >= C.PM25_ELEVATED_THRESHOLD).any(axis=1)]
+        if len(hot) >= C.MIN_ELEVATED_FOR_RECALL:
+            last = hot.date.max()
+            if (now_sgt - last).total_seconds() / 86400 >= C.POST_EPISODE_QUIET_DAYS:
+                out.append(f"post_episode: {len(hot)} elevated hours since the model's training data ended "
+                           f"(last {last:%d %b}); retrain so the episode enters training and validation")
+    for diff in provenance.differences(manifest):
+        kind = "feature_code_changed" if diff.startswith("feature") else "environment_changed"
+        out.append(f"{kind}: {diff}")
+    return out
+
+
+def last_retrain_attempt(models_dir: Path = MODELS_DIR / "hourly") -> str | None:
+    """When the last retrain was attempted: the newest staging directory or promotion-log entry."""
+    times = [datetime.fromtimestamp(p.stat().st_mtime, timezone.utc)
+             for p in (Path(models_dir).parent / "hourly_staging").glob("*") if p.is_dir()]
+    log_path = Path(models_dir) / "promotion_log.jsonl"
+    if log_path.exists():
+        for line in log_path.read_text(encoding="utf-8").splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if entry.get("action") in ("promoted", "rejected") and entry.get("decided_at"):
+                times.append(timestamp(entry["decided_at"]))
+    return iso(max(times)) if times else None
+
+
+def early_life_check(db, models_dir: Path, gold: pd.DataFrame, now) -> str | None:
+    """In a new champion's first EARLY_LIFE_DAYS, compare its live forecasts with what the champion
+    it replaced would have forecast for the same hours. Returns a reason when it is clearly worse."""
+    import joblib
+    models_dir = Path(models_dir)
+    manifest = json.loads((models_dir / "model_manifest.json").read_text())
+    published, replaced = manifest.get("published_at"), manifest.get("replaced")
+    if not published or not replaced or not Path(replaced).exists():
+        return None
+    if (timestamp(now) - timestamp(published)).total_seconds() / 86400 > C.EARLY_LIFE_DAYS:
+        return None
+    previous = json.loads(Path(replaced).read_text())
+    matched = matched_forecasts(db, timestamp(published), timestamp(now))
+    # only forecasts the new champion issued (not the old one's, whose target time fell after the switch)
+    matched = matched.loc[pd.to_datetime(matched["as_of_time"], utc=True) >= pd.Timestamp(timestamp(published))]
+    if matched.empty:
+        return None
+    rows = gold.set_index("date")
+    findings = []
+    for horizon, g in matched.groupby("horizon_hours"):
+        if len(g) < C.MIN_MATCHED_FOR_QUALITY * len(TARGETS):
+            continue
+        origins = pd.to_datetime(g["as_of_time"], utc=True).dt.tz_convert(SGT)
+        old = np.full(len(g), np.nan)
+        for target in g.region.unique():
+            entry = previous["models"][str(int(horizon))][target]
+            sel = (g.region == target).to_numpy() & origins.isin(rows.index).to_numpy()
+            if not sel.any():
+                continue
+            X = rows.loc[origins[sel], previous["feature_columns"]]
+            est = None if entry["model"] == "persistence" else joblib.load(models_dir / entry["artifact"])
+            old[sel] = predict(est, X, target)
+        ok = np.isfinite(old)
+        if ok.sum() < C.MIN_MATCHED_FOR_QUALITY * len(TARGETS):
+            continue
+        new_q = quality(g.loc[ok])
+        old_q = quality(g.loc[ok].assign(forecast_pm25=old[ok]))
+        if old_q.get("mae") is not None and new_q["mae"] > C.EARLY_LIFE_MAE_RATIO * old_q["mae"]:
+            findings.append(f"+{int(horizon)} h MAE {new_q['mae']:.1f} vs {old_q['mae']:.1f}")
+        if (new_q["n_elevated"] >= C.MIN_ELEVATED_FOR_RECALL and old_q["recall"] is not None
+                and new_q["recall"] < old_q["recall"] - C.RECALL_VS_PERSISTENCE_MARGIN):
+            findings.append(f"+{int(horizon)} h recall {new_q['recall']:.2f} vs {old_q['recall']:.2f}")
+    if not findings:
+        return None
+    return ("early_life: the new champion is doing worse than the one it replaced on the same hours ("
+            + "; ".join(findings) + "); review and consider `python -m hazecast.governance rollback`")
 
 
 # ---------------------------------------------------------------------------
@@ -696,8 +869,12 @@ def _metric_rows(window_end: str, results: dict) -> list[tuple]:
         add("stability", "mean_forecast", s["mean_forecast"], s["status"], region, horizon)
     for key, q in results["model_quality"]["groups"].items():
         region, horizon = key.split("|")
-        for metric in ("mae", "rmse", "f2", "recall", "skill", "mae_ratio", "persistence_mae", "n", "n_elevated"):
+        for metric in ("mae", "rmse", "f2", "recall", "skill", "mae_ratio", "persistence_mae", "n", "n_elevated",
+                       "coverage"):
             add("model_quality", metric, q.get(metric), q["status"], region, horizon)
+    for horizon, h in results["model_quality"].get("horizons", {}).items():
+        add("model_quality", "coverage_pooled", h["coverage"], h["coverage_status"], horizon=horizon)
+        add("model_quality", "level_ratio", h.get("level_ratio"), None, horizon=horizon)
     for horizon, cur in results["bias_drift"]["horizons"].items():
         add("bias_drift", "recall_gap", cur["recall_gap"], results["bias_drift"]["status"], horizon=horizon)
         for part in ("day", "night"):
@@ -779,7 +956,18 @@ def run_model_monitor(*, now=None, window_days: int = C.MONITOR_WINDOW_DAYS,
         results = evaluate_window(gold, db, models, cols, baseline, start, end, now=now, sources=source_health(now))
         published = manifest.get("published_at") or datetime.fromtimestamp(
             (models_dir / "model_manifest.json").stat().st_mtime, timezone.utc).isoformat()
-        decision = governance_decision(results, model_published_at=published, now=now)
+        _ensure_tables(db)
+        last = db.execute("SELECT reasons FROM monitor_runs WHERE window_end < ? ORDER BY window_end DESC LIMIT 1",
+                          (iso(end),)).fetchone()
+        try:
+            early = early_life_check(db, models_dir, gold, now)
+        except Exception as exc:  # noqa: BLE001 - a failed comparison must not stop the monitor
+            log.warning("Early-life check skipped: %s", exc)
+            early = None
+        decision = governance_decision(results, model_published_at=published, now=now,
+                                       previous_reasons=json.loads(last[0]) if last else [],
+                                       triggers=scenario_triggers(now, gold, manifest),
+                                       last_retrain_at=last_retrain_attempt(models_dir), early_life=early)
         save_results(db, end, results, decision)
     finally:
         db.close()

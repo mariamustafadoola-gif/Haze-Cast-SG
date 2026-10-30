@@ -35,6 +35,12 @@ def predict_final(gold_path, models_dir, *, max_feature_age_hours=2, now=None):
         raise ValueError("Expected hourly model_manifest.json from final hourly training")
     if sorted(manifest.get("horizons_hours", [])) != list(HORIZONS):
         raise ValueError("Train hourly horizons [6,12,24] before inference")
+    from hazecast import provenance
+    built_differently = provenance.differences(manifest)
+    if built_differently:
+        # Not a refusal: the champion keeps serving, and the monitor asks for a gated retrain.
+        log.warning("Champion was built with different code or libraries (%s); a retrain is due",
+                    "; ".join(built_differently))
     cols = manifest["feature_columns"]
     if not cols or len(set(cols)) != len(cols) or any(c == "date" or c.startswith(("label_", "target_")) for c in cols):
         raise ValueError("Invalid saved feature columns")
@@ -157,7 +163,21 @@ def run_inference(gold_path=GOLD_DIR / "hourly_features.parquet", models_dir=MOD
     records = predict_final(gold_path, models_dir, max_feature_age_hours=max_feature_age_hours)
     saved = archive_forecasts(records, db_path, latest_path=latest_path)
     log.info("Archived %d predictions for origin %s", len(saved), saved[0]["as_of_time"])
+    _score_shadow(gold_path, Path(db_path).parent / "shadow.sqlite", max_feature_age_hours)
     return saved
+
+
+def _score_shadow(gold_path, shadow_db, max_feature_age_hours, shadow_dir=MODELS_DIR / "hourly_shadow"):
+    """During a shadow period (hazecast.governance shadow), score the challenger into its own ledger.
+    Never served, and a failure here never affects the champion's forecasts."""
+    if not (Path(shadow_dir) / "model_manifest.json").exists():
+        return
+    try:
+        shadow = archive_forecasts(predict_final(gold_path, shadow_dir, max_feature_age_hours=max_feature_age_hours),
+                                   shadow_db)
+        log.info("Shadow: archived %d predictions", len(shadow))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Shadow scoring failed (champion unaffected): %s", exc)
 
 
 def main():

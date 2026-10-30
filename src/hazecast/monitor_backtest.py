@@ -128,10 +128,15 @@ def run_backtest(*, step_days: int = 7, window_days: int = MONITOR_WINDOW_DAYS,
         mm._ensure_tables(db)
         last = pd.to_datetime(forecasts.forecast_time).max()
         ends = pd.date_range(burn_in_end.ceil("D") + pd.Timedelta(days=window_days), last.floor("D"), freq=f"{step_days}D")
-        actions = {}
+        actions, previous, last_retrain = {}, [], None
         for end in ends:
             results = mm.evaluate_window(gold, db, models, cols, baseline, end - pd.Timedelta(days=window_days), end)
-            decision = mm.governance_decision(results)  # model age is not meaningful in a replay
+            # Model age is not meaningful in a replay. Persistence and the retrain cooldown are
+            # simulated window by window (a recommended retrain counts as an attempt).
+            decision = mm.governance_decision(results, now=end, previous_reasons=previous, last_retrain_at=last_retrain)
+            previous = decision["reasons"]
+            if decision["action"] == "retrain":
+                last_retrain = end
             mm.save_results(db, end, results, decision)
             actions[str(end.date())] = decision["action"]
             log.info("window ending %s: %s %s", end.date(), decision["action"],

@@ -673,10 +673,14 @@ Rule (`model_monitor.governance_decision`), justified by §4.4:
 
 | Action | When | Why this rule |
 |---|---|---|
-| `fix_data` | stale features or missing columns | retraining on broken inputs makes the model worse; the data owner fixes the source (verified live: no FIRMS key → `fix_data`) |
-| `retrain` | model-quality alert (≥ 3 groups), **or** data drift *and* attribution drift together, **or** champion > 35 days old | in the replay, performance alerts happened only during the real degradation. Drift together with attribution drift means the inputs changed *and* the model's reliance on them changed |
-| `investigate` | any other *alert* (drift alone, attribution alone, bias) | of the 5 drift-only windows in the replay, 4 were followed by no degradation and 1 (10 Aug 2026) by the haze. Only a person can tell these apart (with the fire map in front of them). Retraining automatically on every drift alert would have meant 4 pointless retrains |
-| `none` | no alerts | *warnings* show on the dashboard but don't page anyone (alarm fatigue) |
+| `fix_data` | stale features, missing columns, a source past its age limit, or a frozen PM2.5 feed | retraining on broken inputs makes the model worse; the data owner fixes the source following the data-incident SOP (`MODEL_GOVERNANCE.md` §10) (verified live: no FIRMS key → `fix_data`) |
+| `retrain` | model-quality alert (≥ 3 groups), **or** calibration (coverage) out of range, **or** data drift or unstable forecasts *and* attribution drift together, **or** champion > 35 days old, **or** a scenario (before the fire season, after an episode, after a change in the feature code or libraries). At most one per 7 days, except after a code change | in the replay, performance alerts happened only during the real degradation. Drift together with attribution drift means the inputs changed *and* the model's reliance on them changed. The cooldown keeps a long episode from retraining daily |
+| `investigate` | any other *alert* (drift alone, unstable forecasts alone, attribution alone, bias, early-life review, a retrain held by the cooldown) | of the drift-only windows in the replay, most were followed by no degradation and one (10 Aug 2026) by the haze. Only a person can tell these apart (with the fire map in front of them). Retraining automatically on every drift alert would have meant pointless retrains |
+| `none` | no alerts, or a drift / stability / attribution / coverage signal seen for the first time | *warnings* show on the dashboard but don't page anyone (alarm fatigue); a signal must repeat on the next run to count (persistence) |
+
+Details of persistence, the cooldown, the scenario retrains, haze mode, the
+recent-window gate check, the shadow period, early-life review and the
+threshold review are in `MODEL_GOVERNANCE.md` §5–6.
 
 **Does retraining actually help?** It was tested directly: retrain at
 the first strong signal (8 Sep 2026) and score both models on the rest of

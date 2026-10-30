@@ -53,11 +53,13 @@ import numpy as np
 import pandas as pd
 
 from hazecast import config as C
-from hazecast.config import GOLD_DIR, MODELS_DIR
+from hazecast.config import GOLD_DIR, MODELS_DIR, MONITORING_DIR
 from hazecast.pipeline_store import TARGETS, HORIZONS, atomic_json
 
 log = logging.getLogger(__name__)
 PRODUCTION_DIR = MODELS_DIR / "hourly"
+SHADOW_DIR = MODELS_DIR / "hourly_shadow"
+SHADOW_LEDGER = MONITORING_DIR / "shadow.sqlite"
 MANIFEST = "model_manifest.json"
 # Files that travel with a model version (besides the per-model artifacts).
 COMPANION_FILES = ("eval_summary.csv", "holdout_predictions.csv")
@@ -135,8 +137,72 @@ def _paired_champion_scores(gold: pd.DataFrame, champion: dict, candidate: dict)
     return out
 
 
+def _recent_window_check(gold: pd.DataFrame, candidate: dict, ledger_path: Path) -> dict:
+    """Would the challenger have done as well as what was actually served over the last
+    RECENT_WINDOW_DAYS? Its model choices are refitted on rows whose labels precede the window
+    (its production artifacts saw the window) and scored on the served forecasts' hours, pooled
+    over the targets per horizon. Judged only with MIN_ELEVATED_FOR_RECALL haze hours or more."""
+    import inspect
+    from hazecast.hourly_model import _labelled, _complete, _before, _fit, _predict
+    from hazecast.model_monitor import matched_forecasts
+    from hazecast.pipeline_store import connect
+    from hazecast.train import _metrics
+    if not Path(ledger_path).exists():
+        return dict(passed=True, note="no live forecasts yet: not judged")
+    db = connect(ledger_path)
+    try:
+        newest = db.execute("SELECT MAX(f.forecast_time) FROM forecasts f JOIN actuals a ON "
+                            "f.forecast_time = a.observation_time AND f.region = a.region "
+                            "WHERE a.actual_pm25 IS NOT NULL").fetchone()[0]
+        if newest is None:
+            return dict(passed=True, note="no verified live forecasts yet: not judged")
+        end = pd.Timestamp(newest) + pd.Timedelta(hours=1)
+        start = end - pd.Timedelta(days=C.RECENT_WINDOW_DAYS)
+        matched = matched_forecasts(db, start.to_pydatetime(), end.to_pydatetime())
+    finally:
+        db.close()
+    takes_horizon = "horizon" in inspect.signature(_fit).parameters
+    cols, thr = candidate["feature_columns"], float(candidate["threshold"])
+    horizons, failures = {}, []
+    for h, g in matched.groupby("horizon_hours"):
+        h = int(h)
+        if (g.actual_pm25 >= thr).sum() < C.MIN_ELEVATED_FOR_RECALL:
+            horizons[str(h)] = dict(judged=False, n_elevated=int((g.actual_pm25 >= thr).sum()))
+            continue
+        lab = _labelled(gold, h)
+        origins = pd.to_datetime(g["as_of_time"], utc=True).dt.tz_convert(gold.date.dt.tz)
+        boundary = origins.min()
+        challenger = np.full(len(g), np.nan)
+        for t in g.region.unique():
+            name = candidate["models"][str(h)][t]["model"]
+            rows = _complete(lab, cols, t, h)
+            train = _before(rows, boundary, h)
+            est = _fit(name, train, cols, t, h) if takes_horizon else _fit(name, train, cols, t)
+            sel = (g.region == t).to_numpy()
+            at = lab.set_index("date").reindex(origins[sel])
+            ok = np.isfinite(at[cols].to_numpy(dtype=float)).all(axis=1)
+            if ok.any():
+                idx = np.flatnonzero(sel)[ok]
+                challenger[idx] = _predict(est, at.loc[ok].reset_index(), cols, t)
+        ok = np.isfinite(challenger)
+        y = g.actual_pm25.to_numpy(dtype=float)[ok]
+        served = _metrics(y, g.forecast_pm25.to_numpy(dtype=float)[ok])["f2"]
+        chall = _metrics(y, challenger[ok])["f2"]
+        horizons[str(h)] = dict(judged=True, n=int(ok.sum()), n_elevated=int((y >= thr).sum()),
+                                served_f2=served, challenger_f2=chall, f2_change=chall - served)
+        if chall < served - C.PROMOTION_F2_SEVERE_DROP:
+            failures.append(f"+{h} h F2 {chall:.2f} vs {served:.2f} served")
+    judged = any(v["judged"] for v in horizons.values())
+    return dict(passed=not failures, window_days=C.RECENT_WINDOW_DAYS, horizons=horizons,
+                note=("needs human review: challenger well behind the served forecasts in the recent window ("
+                      + "; ".join(failures) + ")") if failures
+                else None if judged else f"fewer than {C.MIN_ELEVATED_FOR_RECALL} haze hours in the last "
+                                         f"{C.RECENT_WINDOW_DAYS} days: not judged")
+
+
 def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
-                    gold_path: Path = GOLD_DIR / "hourly_features.parquet") -> dict:
+                    gold_path: Path = GOLD_DIR / "hourly_features.parquet",
+                    ledger_path: Path = MONITORING_DIR / "pipeline.sqlite") -> dict:
     import joblib
     from hazecast.hourly_model import _prepare
     candidate_dir = Path(candidate_dir)
@@ -217,6 +283,7 @@ def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
             groups_f2_improved=sum(d > 0 for d in f2_changes.values()), groups_compared=len(f2_changes),
             champion_compared_like_for_like=len(paired),
             note=("needs human review: severe F2 drop in " + ", ".join(severe)) if severe else None)
+    checks["recent_window"] = _recent_window_check(gold, manifest, ledger_path)
     return dict(passed=all(c["passed"] for c in checks.values()), checks=checks, groups=groups)
 
 
@@ -247,11 +314,11 @@ def _publish(manifest: dict, production_dir: Path, **provenance) -> None:
 
 def promote(candidate_dir: Path, production_dir: Path = PRODUCTION_DIR,
             gold_path: Path = GOLD_DIR / "hourly_features.parquet", force: bool = False,
-            reason: str | None = None) -> dict:
+            reason: str | None = None, ledger_path: Path = MONITORING_DIR / "pipeline.sqlite") -> dict:
     candidate_dir, production_dir = Path(candidate_dir), Path(production_dir)
     if force and not (reason and reason.strip()):
         raise ValueError("A forced promotion needs a written reason (--reason)")
-    result = check_candidate(candidate_dir, production_dir, gold_path)
+    result = check_candidate(candidate_dir, production_dir, gold_path, ledger_path)
     result.update(candidate=str(candidate_dir), decided_at=_now(), forced=force and not result["passed"],
                   reason=reason if force else None)
     if not result["passed"] and not force:
@@ -297,6 +364,57 @@ def rollback(to: Path | None = None, production_dir: Path = PRODUCTION_DIR) -> d
     return dict(restored=str(target), archived=str(archived))
 
 
+def shadow(candidate_dir: Path, shadow_dir: Path = SHADOW_DIR, production_dir: Path = PRODUCTION_DIR) -> dict:
+    """Start a shadow period: hourly inference also scores this challenger into a separate ledger
+    (data/monitoring/shadow.sqlite), never served, so it can be compared with the champion on the
+    same hours (`shadow-report`) before a promotion. Replaces any running shadow."""
+    candidate_dir, shadow_dir = Path(candidate_dir), Path(shadow_dir)
+    manifest = _load(candidate_dir / MANIFEST)
+    shadow_dir.mkdir(parents=True, exist_ok=True)
+    (shadow_dir / MANIFEST).unlink(missing_ok=True)
+    for entries in manifest["models"].values():
+        for e in entries.values():
+            if e.get("artifact"):
+                shutil.copyfile(candidate_dir / e["artifact"], shadow_dir / e["artifact"])
+    atomic_json(shadow_dir / MANIFEST, {**manifest, "shadow_from": str(candidate_dir), "shadow_started_at": _now()})
+    _log(Path(production_dir), dict(action="shadow_started", candidate=str(candidate_dir), decided_at=_now()))
+    return dict(shadow=str(shadow_dir), candidate=str(candidate_dir))
+
+
+def stop_shadow(shadow_dir: Path = SHADOW_DIR, production_dir: Path = PRODUCTION_DIR) -> dict:
+    (Path(shadow_dir) / MANIFEST).unlink(missing_ok=True)
+    _log(Path(production_dir), dict(action="shadow_stopped", decided_at=_now()))
+    return dict(stopped=True)
+
+
+def shadow_report(shadow_ledger: Path = SHADOW_LEDGER, ledger: Path = MONITORING_DIR / "pipeline.sqlite") -> dict:
+    """Champion vs shadow on identical hours (same target time, region and horizon) with NEA actuals."""
+    import sqlite3
+    from hazecast.model_monitor import quality
+    if not Path(shadow_ledger).exists() or not Path(ledger).exists():
+        return dict(horizons={}, note="no shadow forecasts yet")
+    db = sqlite3.connect(ledger)
+    try:
+        db.execute("ATTACH DATABASE ? AS shadow", (str(shadow_ledger),))
+        rows = pd.read_sql("""
+            SELECT f.horizon_hours, f.region, f.forecast_time, f.forecast_pm25 AS champion, s.forecast_pm25 AS shadow,
+                   f.threshold, a.actual_pm25
+            FROM forecasts f
+            JOIN shadow.forecasts s ON s.forecast_time = f.forecast_time AND s.region = f.region
+                                   AND s.horizon_hours = f.horizon_hours AND s.as_of_time = f.as_of_time
+            JOIN actuals a ON a.observation_time = f.forecast_time AND a.region = f.region
+            WHERE a.actual_pm25 IS NOT NULL""", db)
+    finally:
+        db.close()
+    out = {}
+    for h, g in rows.groupby("horizon_hours"):
+        champ = quality(g.rename(columns={"champion": "forecast_pm25"}))
+        shad = quality(g.rename(columns={"shadow": "forecast_pm25"}))
+        out[str(int(h))] = {k: dict(champion=champ.get(k), shadow=shad.get(k))
+                            for k in ("n", "mae", "coverage", "recall", "f2", "n_elevated")}
+    return dict(horizons=out, note=None if out else "no shadow hours with actuals yet")
+
+
 def status(production_dir: Path = PRODUCTION_DIR) -> dict:
     production_dir = Path(production_dir)
     if not (production_dir / MANIFEST).exists():
@@ -317,10 +435,17 @@ def main():
     r = sub.add_parser("rollback")
     r.add_argument("--to", type=Path)
     sub.add_parser("status")
+    s = sub.add_parser("shadow", help="score a challenger alongside the champion, unserved")
+    s.add_argument("--candidate", type=Path, required=True)
+    sub.add_parser("shadow-report", help="champion vs shadow on identical hours")
+    sub.add_parser("shadow-stop")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     out = (promote(a.candidate, force=a.force, reason=a.reason) if a.cmd == "promote"
-           else rollback(a.to) if a.cmd == "rollback" else status())
+           else rollback(a.to) if a.cmd == "rollback"
+           else shadow(a.candidate) if a.cmd == "shadow"
+           else shadow_report() if a.cmd == "shadow-report"
+           else stop_shadow() if a.cmd == "shadow-stop" else status())
     print(json.dumps(out, indent=2, default=str))
 
 

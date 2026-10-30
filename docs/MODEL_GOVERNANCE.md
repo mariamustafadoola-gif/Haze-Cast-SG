@@ -35,6 +35,7 @@ same pull request.
 | `hazecast_hourly` | :10 every hour | Live fetch, then bronze/silver/gold, then a **freshness gate** (newest complete feature row ≤ 2 h old), then archives 18 forecasts. Stale features mean **no forecast** (the run is skipped, not failed) |
 | `hazecast_monitoring` | 01:30 daily | Makes the last 10 days of raw data permanent, fetches NEA actuals, runs the five monitors, rebuilds the dashboard, applies the **retraining rule** (§5) and branches |
 | `hazecast_retrain` | 03:00 on the 1st, or triggered | Trains a challenger in staging, replays its holdout, runs the **promotion gate** (§6), promotes it or keeps the champion, then refreshes the monitoring baseline |
+| `hazecast_haze_monitoring` | 07:30, 13:30, 19:30 | **Haze mode**: stops at once unless a region read ≥ 56 µg/m³ in the last 24 h; during an episode it runs the monitor and the retraining rule, so with the 01:30 run the model is checked every 6 h |
 
 ## 4. What is monitored (`hazecast.model_monitor`)
 
@@ -50,7 +51,7 @@ How every threshold was derived, with the replay evidence, is in
 |---|---|---|---|
 | **Data quality** (30-day window) | Are the model's inputs still healthy and like the training data? | schema, freshness, missing rate, share outside training range, stuck PM2.5 feeds, age of each upstream source (live), and **CSI** (characteristic stability index: PSI of each feature) against the **same monsoon season** in the training years | *fail*: missing column, features > 3 h old, a source past its limit (PM2.5 or weather > 3 h; fire detections > 39 h, i.e. past the 15 h trust window and the 24 h carry-forward), or a region's PM2.5 unchanged for ≥ 12 h. *Alert*: ≥ 3 features beyond **both** their calibrated CSI limit (99th percentile over normal 30-day windows of that season in the training period) and their all-season PSI limit; missing rate +5 pp or > 5 % out of range |
 | **Stability** (30-day window) | Is the model's output still distributed as it was in this season? | **PSI** (population stability index) of each model's forecasts against its forecasts on the same season in the training years | ≥ 3 of 18 models above their calibrated PSI limit (99th percentile over normal windows of that season). Works without actuals, so it reacts before accuracy can be judged |
-| **Model quality** (7-day window) | Are forecasts still doing their job, verified against NEA? | MAE, RMSE, F2, recall, MAE skill and **recall of persistence on the same hours** | with ≥ 48 matched hours: MAE > 1.5 × holdout MAE, *or* (with ≥ 12 haze hours) recall more than 0.25 below persistence's. Alert at ≥ 3 of 18 groups. MAE skill vs persistence is reported, not alerted: the q85 models are upward-biased by design |
+| **Model quality** (7-day window) | Are forecasts still doing their job, verified against NEA? | MAE, RMSE, F2, recall, MAE skill, **recall of persistence on the same hours**, **coverage** (share of hours at or below the q85 forecast) and the pollution level relative to the holdout | with ≥ 48 matched hours: MAE > 1.5 × holdout MAE, *or* (with ≥ 12 haze hours) recall more than 0.25 below persistence's. Alert at ≥ 3 of 18 groups. **Coverage** pooled per horizon outside its normal weekly range (1st–99th percentile of quiet holdout weeks) is a calibration alert, judged every week, haze or not. MAE skill vs persistence is reported, not alerted: the q85 models are upward-biased by design. When an MAE alert comes with a level 1.5× the holdout average or more, the reason says so (a harder week, not necessarily a worse model) |
 | **Bias drift** (7-day window) | Is any region (or time of day) served systematically worse? | per-region recall, mean signed error, alert rate vs actual rate; day vs night MAE | recall gap between regions (each ≥ 12 haze hours) > 0.30, or > 0.20 wider than at training; a region's mean signed error shifts > 8 µg/m³ |
 | **Feature attribution drift** (30-day window) | Has what the model relies on changed? | label-free permutation attribution; **NDCG@10** vs baseline ranking | NDCG below the model's **calibrated limit** (1st percentile over training-period windows, at most 0.90). Alert at ≥ 3 of 18 models |
 
@@ -72,9 +73,33 @@ The monitoring DAG turns the five monitor results into one action
 | Action | Rule | What happens |
 |---|---|---|
 | **fix_data** | data-quality *fail*: missing feature columns, stale features, a source past its age limit, or a stuck PM2.5 feed | No retraining: a model retrained on broken data would be worse. Data owner investigates the failing source (§7) following the data-incident SOP (§10). Inference is already refusing stale features |
-| **retrain** | model-quality *alert* (≥ 3 groups), **or** data drift (CSI) or unstable forecasts (PSI) **together with** attribution drift, **or** the champion is older than 35 days | `hazecast_retrain` is triggered automatically; the promotion gate still decides whether anything changes |
-| **investigate** | any other *alert*: drift alone, unstable forecasts alone, attribution drift alone, bias drift | ML owner reviews the dashboard within 2 working days and decides retrain / threshold change / no-op, recording why |
-| **none** | no alerts (warnings are shown on the dashboard only) | nothing |
+| **retrain** | model-quality *alert* (≥ 3 groups); **or** calibration (coverage) outside its normal weekly range; **or** data drift (CSI) or unstable forecasts (PSI) **together with** attribution drift; **or** the champion is older than 35 days; **or** a scenario (below) | `hazecast_retrain` is triggered automatically; the promotion gate still decides whether anything changes. At most one automatic retrain per 7 days (`RETRAIN_COOLDOWN_DAYS`), except after a change in the feature path or libraries; a retrain held by the cooldown becomes *investigate* |
+| **investigate** | any other *alert*: drift alone, unstable forecasts alone, attribution drift alone, bias drift, a new champion doing worse than the one it replaced (early life), a retrain held by the cooldown | ML owner reviews the dashboard within 2 working days and decides retrain / threshold change / rollback / no-op, recording why |
+| **none** | no alerts, or a drift / stability / attribution / coverage signal seen for the first time (warnings are shown on the dashboard only) | nothing |
+
+**Persistence.** Drift (CSI), unstable forecasts (PSI), attribution drift and
+calibration (coverage) count only when the previous monitoring run had the
+same signal: a single noisy window never pages anyone (live: two days in a row;
+during haze mode, 6 h apart). Performance alerts against actuals and data
+failures act at once.
+
+**Scenario retrains** (no threshold would ask for them;
+`model_monitor.scenario_triggers`):
+- **Before the fire season:** from 15 July, if the champion was trained before then (`PRE_SEASON_RETRAIN`).
+- **After an episode:** 12 or more elevated hours since the champion's training data ended, then 14 quiet days (`POST_EPISODE_QUIET_DAYS`), so the episode enters training and validation.
+- **After a change in the feature path or libraries:** the manifest records a fingerprint of the feature code and settings and the model libraries' versions (`hazecast.provenance`). A mismatch with the running code retrains even inside the cooldown, because the champion would otherwise get features it was not trained on; inference logs a warning meanwhile.
+
+**Haze mode.** While any region read ≥ 56 µg/m³ in the last 24 h,
+`hazecast_haze_monitoring` adds three runs a day. The cooldown keeps a long
+episode from retraining more than weekly (the replay recommended a retrain
+in 9 consecutive weeks).
+
+**Threshold review.** After every haze season and each quarter, run
+`python -m hazecast.alert_review` (and `--db data/monitoring/backtest.sqlite`
+for the replay). It lists each signal type with how many of its alerts were
+followed by a real loss in performance within 4 weeks. A signal with many
+alerts and few followed is a candidate for a stricter limit; record any change
+in this document.
 
 Evidence from replaying the 2024–26 holdout (117 weekly windows):
 - **Overall:** 103 none, 6 investigate, 8 retrain.
@@ -113,17 +138,27 @@ automatically once its labels are in the development window.
      - F2 within 0.05 of the champion's in at least half the groups.
      - **No single group's F2 falling by more than 0.10.** If one does, the challenger is held for a person to decide (`--force` with a recorded reason), not promoted automatically.
      - MAE at most 2× the champion's in every group, as a blow-up guard.
-     The first version of this check used MAE (within 10%). Evaluating the LOSO-tuned model from the `XGB_Tuned` branch showed why that was wrong: it improved F2 in 13 of 18 groups, but a higher quantile forecasts higher by design (MAE up to 1.8×), so the MAE rule rejected it. It also did not single out the one genuine regression (west +6 h, F2 0.779 → 0.628). The F2 rule passes the broad improvement and flags exactly that group.
+   - **Recent window** (`RECENT_WINDOW_DAYS` = 90): the challenger's model choices, refitted without the last 90 days, must not fall more than 0.10 F2 behind the forecasts actually served in those days (pooled per horizon). Judged only with 12 or more haze hours in the window; otherwise noted as not judged. The holdout is mostly older data; this checks the challenger on the conditions it meets first. A failure holds the challenger for a person.
+
+     The first version of the no-regression check used MAE (within 10%). Evaluating the LOSO-tuned model from the `XGB_Tuned` branch showed why that was wrong: it improved F2 in 13 of 18 groups, but a higher quantile forecasts higher by design (MAE up to 1.8×), so the MAE rule rejected it. It also did not single out the one genuine regression (west +6 h, F2 0.779 → 0.628). The F2 rule passes the broad improvement and flags exactly that group.
 4. **Pass:** artifacts are copied, the old manifest is archived to `history/`, and the new manifest is written **last**, so inference never sees a half-published model. The monitoring baseline (including the calibrated limits) is rebuilt for the new champion. **Fail:** the champion keeps serving, and the rejection and its reasons go to `promotion_log.jsonl`.
 5. **Rollback** (any time, one command, no retraining): `python -m hazecast.governance rollback` restores the previous manifest. Artifacts are never deleted, so any archived version can be restored with `--to`.
 6. **Manual override:** `python -m hazecast.governance promote --candidate <dir> --force --reason "..."` promotes despite a failed gate. The command refuses without a reason, and stores it in `promotion_log.jsonl` and in the published manifest (`forced_reason`, `forced_over`). Only the ML owner may use it, and the team channel should be told.
 7. **Model selection stability:** a candidate other than `xgboost_q85` must beat it in ≥ 90 % of paired weekly bootstrap resamples of the validation predictions (walkthrough §3.5). This prevents promotion holds caused by switches on thin, noisy margins.
-8. **Reproducibility:** train, gate and replay in the same environment (the Airflow image). On 28 Oct the same model scored F2 0.759 with xgboost 3.2.0 (Airflow) and 0.790 with 3.4.1 (a local environment), because the requirements are lower bounds only. Pinning exact versions is recommended.
+8. **Reproducibility:** train, gate and replay in the same environment (the Airflow image). On 28 Oct the same model scored F2 0.759 with xgboost 3.2.0 (Airflow) and 0.790 with 3.4.1 (a local environment), because the requirements were lower bounds only. Since 30 Oct `requirements-pipeline.txt` pins exact versions (those of the running images); upgrade deliberately, rebuild, and let the provenance check trigger the retrain.
+9. **Early life:** for 7 days after a promotion, the monitor compares the new champion's live forecasts with what the champion it replaced would have forecast for the same hours (its archived artifacts). MAE above 1.25× the previous one's at any horizon, or recall 0.25 lower with 12+ haze hours, asks for a review, with rollback as the likely action.
 
-**Optional shadow period** (recommended before the first haze season in
-production): rather than promoting at step 4, run inference for the
-staging directory into a second ledger for 7 days, then compare both
-ledgers' model-quality metrics on identical hours before switching.
+**Shadow period** (recommended before the first haze season in
+production, and for any challenger the team is unsure about):
+```bash
+python -m hazecast.governance shadow --candidate data/models/hourly_staging/<run>
+python -m hazecast.governance shadow-report      # champion vs shadow on identical hours
+python -m hazecast.governance shadow-stop
+```
+While a shadow is set, hourly inference also scores it into
+`data/monitoring/shadow.sqlite`. It is never served, and a failure there never
+affects the champion. After 7 days, compare the report's MAE, coverage and
+recall per horizon, then promote (or not) through the normal gate.
 
 ## 7. Roles and response times
 
