@@ -62,6 +62,12 @@ def fetch_live(days: int = 3) -> dict:
            "weather": [str(p) for p in live.write_weather_raw(days + 1, now=now)]}
     if _firms_key_present():
         out["firms"] = str(live.write_firms_raw(live.fetch_firms(start, now.date())))
+        try:  # how far FIRMS has processed: lets silver tell "no fires" from "not delivered yet"
+            info = live.fetch_firms_availability()
+            live.write_firms_availability(info)
+            out["firms_processed_through"] = info["max_date"]
+        except Exception as exc:  # noqa: BLE001 - without it the 15 h rule applies, as before
+            log.warning("FIRMS availability check failed (%s); fire counts trusted 15 h after the last detection", exc)
     else:
         log.warning("FIRMS_MAP_KEY not set: fire features will go stale (fire_data_gap_recent will flag it)")
     return out

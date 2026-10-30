@@ -121,6 +121,11 @@ FIRE_LATENCY_HOURS = 3                       # FIRMS near-real-time delivery: wi
 # stalled feed, so the features are left empty (the forecast gate refuses) rather than reading an
 # outage as "no fires". 15 h = one pass interval + ~3 h delivery margin; in 12 years of data,
 # silences > 15 h occurred 295 times vs 298 for > 13 h, so the margin costs no outage detection.
+# Since 30 Oct the counts are also trusted up to the hour FIRMS reports as processed (its
+# data_availability service, saved by each live fetch; bronze_to_silver.firms_processed_until):
+# an empty processed period is a true "no fires", so a quiet wet-season spell (2-4 days without
+# a detection, several since 2024) no longer pauses forecasts, while an undelivered pass on a day
+# FIRMS has not listed (28 Oct 2026) stays unknown.
 FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION = 15
 # When FIRMS is late (28 Oct 2026: the 13:00 SGT pass was still undelivered 6 h later, so the
 # fire features went empty and two hourly forecasts were skipped), the last known fire features

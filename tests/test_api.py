@@ -62,3 +62,19 @@ def test_dashboard_rounds_values_and_flags_stale_forecasts():
     assert "STALE_HOURS" in html
     docs_copy = STATIC.parents[2] / "docs" / "index.html"
     assert docs_copy.read_text(encoding="utf-8") == html  # GitHub Pages copy stays identical
+
+
+def test_source_status_names_each_upstream_source(client, monkeypatch):
+    import hazecast.model_monitor as mm
+    monkeypatch.setattr(api, "_SOURCES_CACHE", {})
+    monkeypatch.setattr(mm, "source_health", lambda now: {"pm25": {"age_hours": 0.5, "status": "ok"},
+                                                          "fires": {"age_hours": 30.0, "status": "alert"}})
+    body = client.get("/health/sources").json()
+    assert body["sources"]["fires"]["status"] == "alert" and "checked_at" in body
+
+
+def test_dashboard_greys_out_target_times_that_have_passed():
+    html = STATIC.read_text(encoding="utf-8")
+    assert "function isPassed(row)" in html and "dataMode === MODE_LIVE" in html   # never applied to demo data
+    assert html.count("isPassed(") >= 5      # mini cells, region band, national figure, detail bar, notice
+    assert ".c-mini.passed" in html and "waiting for " in html

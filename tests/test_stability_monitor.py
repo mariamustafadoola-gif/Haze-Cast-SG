@@ -86,12 +86,15 @@ def test_source_health_names_the_failing_source(tmp_path):
     pd.DataFrame({"ts": [local - pd.Timedelta(hours=1)]}).to_parquet(tmp_path / "pm25.parquet")
     pd.DataFrame({"ts": [local - pd.Timedelta(hours=1)] * len(C.WEATHER_POINTS) + [local - pd.Timedelta(hours=10)],
                   "point": list(C.WEATHER_POINTS) + ["singapore"]}).to_parquet(tmp_path / "weather.parquet")
-    # last detection 20 h ago: past the 15 h trust window, inside the 24 h carry-forward
-    grid_end = local - pd.Timedelta(hours=20) + pd.Timedelta(hours=C.FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION)
-    pd.DataFrame({"ts": [grid_end]}).to_parquet(tmp_path / "firms_hourly.parquet")
+    # fire counts known to 5 h ago: past the 4 h feature lag (carry-forward in use), inside the 24 h limit
+    pd.DataFrame({"ts": [local - pd.Timedelta(hours=5)]}).to_parquet(tmp_path / "firms_hourly.parquet")
     health = mm.source_health(now, tmp_path)
     assert health["pm25"]["status"] == "ok" and health["weather_singapore"]["status"] == "ok"
-    assert health["fires"]["status"] == "warn" and health["fires"]["age_hours"] == pytest.approx(20)
+    assert health["fires"]["status"] == "warn" and health["fires"]["age_hours"] == pytest.approx(5)
+    pd.DataFrame({"ts": [local - pd.Timedelta(hours=3)]}).to_parquet(tmp_path / "firms_hourly.parquet")
+    assert mm.source_health(now, tmp_path)["fires"]["status"] == "ok"
+    pd.DataFrame({"ts": [local - pd.Timedelta(hours=30)]}).to_parquet(tmp_path / "firms_hourly.parquet")
+    assert mm.source_health(now, tmp_path)["fires"]["status"] == "alert"     # carry-forward exhausted
     pd.DataFrame({"ts": [local - pd.Timedelta(hours=6)]}).to_parquet(tmp_path / "pm25.parquet")
     assert mm.source_health(now, tmp_path)["pm25"]["status"] == "alert"
 

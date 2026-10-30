@@ -74,6 +74,10 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
 .c-mini{flex:1; text-align:center; border-radius:6px; padding:2px 0;}
 .c-mini .lbl{font-size:7px; font-weight:800; color:var(--ink-muted); text-transform:uppercase;}
 .c-mini .val{font-size:11px; font-weight:800; margin-top:1px;}
+/* a target time already in the past: kept visible, clearly no longer a forecast */
+.c-mini.passed{opacity:.4; background:transparent !important;}
+.c-mini.passed .val{text-decoration:line-through;}
+.passed-note{color:var(--ink-muted); font-weight:700;}
 
 @media (max-height:480px){
   body{padding:8px 14px 6px;}
@@ -231,6 +235,8 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
   let forecastAgeHours = null;
   // Hours the fire features were carried forward because NASA FIRMS was late (0 = current).
   let fireCarriedHours = 0;
+  // Freshness of each upstream source from /health/sources (live mode only; null if unavailable).
+  let sources = null;
   let dataMode = MODE_LIVE;
   let mockReason = "manual"; // "manual" (user chose Mockup) or "fallback" (live call failed)
 
@@ -318,6 +324,7 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     const asOf = forecastData.map(r => Date.parse(r.as_of_time)).filter(Number.isFinite);
     forecastAgeHours = asOf.length ? (Date.now() - Math.max(...asOf)) / 3600000 : null;
     fireCarriedHours = Math.max(0, ...forecastData.map(r => Number(r.fire_carried_hours) || 0));
+    try { sources = (await fetchJSON("/health/sources")).sources; } catch (e) { sources = null; }
     // Health is best-effort and doesn't gate live mode -- it just reflects
     // whether the API process itself looks up, separately from forecast data.
     try {
@@ -333,7 +340,40 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     forecastData = MOCK_FORECAST;
     forecastAgeHours = null;
     fireCarriedHours = 0;
+    sources = null;
     setHealthPill("mock");
+  }
+
+  // While new forecasts are held back (a source is late), the last forecast stays on screen;
+  // any target time it was made for that has already passed is greyed out, not shown as a forecast.
+  function isPassed(row) {
+    return dataMode === MODE_LIVE && row && Date.parse(row.forecast_time) <= Date.now();
+  }
+
+  // The row to headline for a region: the main horizon, or, once its target time has passed,
+  // the nearest horizon still ahead (all passed: the main one, marked as passed).
+  function currentRow(rows) {
+    const main = rows.find(r => r.horizon_hours === activeHorizon);
+    if (!isPassed(main)) return main;
+    const ahead = rows.filter(r => !isPassed(r)).sort((a, b) => a.horizon_hours - b.horizon_hours);
+    return ahead[0] || main;
+  }
+
+  // How to label a headlined row: its band, plus which horizon it is when it is not the main one.
+  function rowLabel(row, b) {
+    if (isPassed(row)) return "target time passed";
+    return b.label + (row.horizon_hours !== activeHorizon ? " · +" + row.horizon_hours + " h" : "");
+  }
+
+  // Names of the upstream sources that are late (status not ok), for the notice.
+  function lateSources() {
+    if (!sources) return [];
+    const out = [];
+    const weather = Object.keys(sources).filter(k => k.startsWith("weather_") && sources[k].status !== "ok");
+    if (sources.pm25 && sources.pm25.status !== "ok") out.push("PM2.5 (" + Math.round(sources.pm25.age_hours || 0) + " h old)");
+    if (weather.length) out.push("weather at " + weather.map(k => k.slice(8)).join(", "));
+    if (sources.fires && sources.fires.status === "alert") out.push("satellite fire data");
+    return out;
   }
 
   function updateModeUI() {
@@ -348,8 +388,11 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     } else if ((forecastAgeHours != null && forecastAgeHours > STALE_HOURS) || fireCarriedHours > 0) {
       const parts = [];
       if (forecastAgeHours != null && forecastAgeHours > STALE_HOURS) {
+        const late = lateSources();
+        const passed = forecastData.filter(r => r.region === "national" && isPassed(r)).length;
         parts.push("Forecast is from data " + Math.round(forecastAgeHours) +
-          " h old — newer data is not available yet, so treat it with caution.");
+          " h old — no new forecast until fresh data arrives" + (late.length ? " (waiting for " + late.join("; ") + ")" : "") +
+          ", so treat it with caution." + (passed ? " " + passed + " of 3 target times have passed and are greyed out." : ""));
       }
       if (fireCarriedHours > 0) {
         parts.push("Satellite fire data is " + Math.round(fireCarriedHours) +
@@ -402,11 +445,11 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     if (!forecastData.length) return;
 
     // national figure, above the map
-    const nat6 = forecastData.find(r => r.region === "national" && r.horizon_hours === activeHorizon);
+    const nat6 = currentRow(forecastData.filter(r => r.region === "national"));
     if (nat6) {
       const nb = band(nat6.forecast_pm25);
       const natEl = document.getElementById("nationalFigure");
-      natEl.textContent = fmtPm(nat6.forecast_pm25) + " µg/m³ · " + nb.label;
+      natEl.textContent = fmtPm(nat6.forecast_pm25) + " µg/m³ · " + rowLabel(nat6, nb);
       natEl.style.color = "var(--" + nb.key + ")";
     }
 
@@ -416,7 +459,7 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     Object.keys(REGION_POS).forEach(region => {
       const pos = REGION_POS[region];
       const rows = forecastData.filter(r => r.region === region);
-      const main = rows.find(r => r.horizon_hours === activeHorizon);
+      const main = currentRow(rows);
       if (!main) return;
       const b = band(main.forecast_pm25);
       const h6 = rows.find(r => r.horizon_hours === 6);
@@ -428,7 +471,10 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
       const mini = (row, h) => {
         if (!row) return '<div class="c-mini"><div class="lbl">' + h + 'h</div><div class="val">—</div></div>';
         const mb = band(row.forecast_pm25);
-        return '<div class="c-mini" style="background:var(--' + mb.key + '-bg)"><div class="lbl">' + h + 'h</div><div class="val" style="color:var(--' + mb.key + ')">' + fmtPm(row.forecast_pm25) + '</div></div>';
+        const past = isPassed(row);
+        return '<div class="c-mini' + (past ? ' passed' : '') + '" style="background:var(--' + mb.key + '-bg)"' +
+          (past ? ' title="Target time has passed; waiting for a new forecast"' : '') + '><div class="lbl">' + h + 'h</div>' +
+          '<div class="val" style="color:var(--' + mb.key + ')">' + fmtPm(row.forecast_pm25) + '</div></div>';
       };
       const div = document.createElement("div");
       div.className = "callout" + (region === selectedRegion ? " sel" : "");
@@ -443,7 +489,7 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
             <div class="c-num-row"><span class="c-num display" style="color:var(--${b.key});">${fmtPm(main.forecast_pm25)}</span><span class="c-unit">&micro;g/m&sup3;</span></div>
           </div>
         </div>
-        <div class="c-band" style="color:var(--${b.key});">${b.label} &middot; ${b.note}</div>
+        <div class="c-band" style="color:var(--${b.key});">${isPassed(main) ? '<span class="passed-note">target time passed</span>' : rowLabel(main, b) + ' &middot; ' + b.note}</div>
         <div class="c-mini-row">${mini(h6, 6)}${mini(h12, 12)}${mini(h24, 24)}</div>
       `;
       callouts.appendChild(div);
@@ -454,12 +500,13 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
 
   function renderBar() {
     const rows = forecastData.filter(r => r.region === selectedRegion);
-    const main = rows.find(r => r.horizon_hours === activeHorizon) || rows[0];
+    const main = currentRow(rows) || rows[0];
     if (!main) return;
     const b = band(main.forecast_pm25);
     document.getElementById("detailRegion").textContent = selectedRegion;
     document.getElementById("detailRegion").style.color = "var(--" + b.key + ")";
-    document.getElementById("detailVal").textContent = fmtPm(main.forecast_pm25) + " µg/m³ · " + b.label;
+    document.getElementById("detailVal").textContent = fmtPm(main.forecast_pm25) + " µg/m³ · " +
+      rowLabel(main, b);
     document.getElementById("detailVal").style.color = "var(--ink-muted)";
 
     const BAND_SCALE_MAX = 250; // matches the "250+" scale label; values beyond this pin to the right edge

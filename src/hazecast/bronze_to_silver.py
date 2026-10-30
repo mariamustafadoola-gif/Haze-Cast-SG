@@ -3,12 +3,14 @@ reshape into tidy long frames. No feature engineering happens here -- that
 is silver -> gold's job. Silver's job is just "clean and trustworthy".
 """
 from __future__ import annotations
+import json
 import logging
 from pathlib import Path
 
 import pandas as pd
 
-from hazecast.config import BRONZE_DIR, SILVER_DIR, SG_REGIONS, MAX_FILL_HOURS, FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION
+from hazecast.config import (BRONZE_DIR, RAW_DIR, SILVER_DIR, SG_REGIONS, MAX_FILL_HOURS,
+                             FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION, FIRE_LATENCY_HOURS)
 
 log = logging.getLogger(__name__)
 
@@ -109,21 +111,52 @@ def firms_daily_silver(bronze_path: Path = BRONZE_DIR / "firms.parquet") -> pd.D
     return counts.reset_index()
 
 
-def firms_hourly_silver(bronze_path: Path = BRONZE_DIR / "firms.parquet") -> pd.DataFrame:
+def firms_processed_until(availability_path: Path = RAW_DIR / "firms" / "availability.json") -> pd.Timestamp | None:
+    """Up to which hour (Singapore time) FIRMS has certainly delivered, from the availability check
+    the live fetch saves (hazecast.ingest.live.fetch_firms_availability): the end of the newest
+    processed UTC day, but no later than FIRE_LATENCY_HOURS + 1 before the check. So "today is
+    being processed" means passes older than 4 h are in; a day FIRMS has not listed (28 Oct 2026:
+    still the previous day hours after the 13:00 SGT pass) is not trusted at all. Residual risk: a
+    second pass of a listed UTC day arriving more than 4 h late is read as zero until it arrives
+    (the next rebuild corrects it; training never sees it). None if no check has been saved."""
+    path = Path(availability_path)
+    if not path.exists():
+        return None
+    try:
+        info = json.loads(path.read_text(encoding="utf-8"))
+        checked = pd.Timestamp(info["checked_at"])
+        day_end = pd.Timestamp(info["max_date"]).tz_localize("UTC") + pd.Timedelta(days=1)
+    except (ValueError, KeyError, TypeError) as exc:
+        log.warning("Ignoring unreadable FIRMS availability file %s: %s", path, exc)
+        return None
+    until = min(day_end, checked - pd.Timedelta(hours=FIRE_LATENCY_HOURS + 1))
+    return until.tz_convert("Asia/Singapore").tz_localize(None).floor("h")
+
+
+def firms_hourly_silver(bronze_path: Path = BRONZE_DIR / "firms.parquet",
+                        availability_path: Path = RAW_DIR / "firms" / "availability.json") -> pd.DataFrame:
     """Detection-level FIRMS bronze -> detections per hour (Singapore time) per region.
 
-    Hours without a detection are 0 (no satellite pass, or no fire). The grid ends
-    FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION after the latest detection: passes are ~11 h
-    apart, so a longer silence means a missing pass or a stalled feed, and counts after
-    that are unknown (left out, so the hourly features are empty and no forecast is
-    issued from them). Longer gaps inside the history stay as zeros and are covered by
-    the daily data_gap flag, as in firms_daily_silver.
+    Hours without a detection are 0 (no satellite pass, or no fire). Where the grid ends
+    decides which counts are known:
+      - FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION after the latest detection (passes are ~11 h
+        apart, so a longer silence may mean a missing pass or a stalled feed), or
+      - later, up to the hour FIRMS reports as processed (firms_processed_until): an empty
+        processed period is a true "no fires", e.g. several quiet days in the wet season,
+        which the 15 h rule alone would have read as an outage and paused forecasts on.
+    Counts after the end are unknown (left out: the gold features are carried forward up to
+    24 h, then empty, and no forecast is issued). Longer gaps inside the history stay as zeros
+    and are covered by the daily data_gap flag, as in firms_daily_silver.
     """
     df = pd.read_parquet(bronze_path)
     if "ts" not in df.columns:
         raise ValueError(f"{bronze_path} has no detection timestamps; re-run hazecast.ingest.firms")
     counts = df.groupby([df["ts"].dt.floor("h"), "region"]).size().unstack(fill_value=0)
     end = counts.index.max() + pd.Timedelta(hours=FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION)
+    processed = firms_processed_until(availability_path)
+    if processed is not None and processed > end:
+        log.info("FIRMS processed through %s: fire counts known to then (15 h rule alone: %s)", processed, end)
+        end = processed
     counts = counts.reindex(pd.date_range(counts.index.min(), end, freq="h"), fill_value=0)
     for region in ["sumatra", "kalimantan"]:
         if region not in counts.columns:

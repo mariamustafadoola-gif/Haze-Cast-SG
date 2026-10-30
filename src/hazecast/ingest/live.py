@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import logging
 import os
 import time
@@ -201,6 +202,31 @@ def fetch_firms(start: date, end: date) -> pd.DataFrame:
     df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     log.info("fires: %d detections", len(df))
     return df
+
+
+FIRMS_AVAILABILITY_URL = "https://firms.modaps.eosdis.nasa.gov/api/data_availability/csv/{key}/{source}"
+FIRMS_AVAILABILITY_FILE = "availability.json"
+
+
+def fetch_firms_availability(source: str = FIRMS_SOURCE) -> dict:
+    """The newest UTC day FIRMS has processed for `source` (its data_availability service).
+    An empty detection file cannot say whether there were no fires or no delivery; this can."""
+    key = _env("FIRMS_MAP_KEY")
+    if not key:
+        raise RuntimeError("No FIRMS_MAP_KEY")
+    rows = pd.read_csv(io.StringIO(_get(FIRMS_AVAILABILITY_URL.format(key=key, source=source)).text))
+    row = rows.loc[rows["data_id"] == source]
+    if row.empty:
+        raise RuntimeError(f"FIRMS availability has no row for {source}")
+    return dict(source=source, max_date=str(row["max_date"].iloc[0]),
+                checked_at=pd.Timestamp.now(tz="UTC").isoformat())
+
+
+def write_firms_availability(info: dict, raw_dir: Path = RAW_DIR / "firms") -> Path:
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    path = raw_dir / FIRMS_AVAILABILITY_FILE
+    path.write_text(json.dumps(info), encoding="utf-8")
+    return path
 
 
 def write_firms_raw(df: pd.DataFrame, raw_dir: Path = RAW_DIR / "firms") -> Path:

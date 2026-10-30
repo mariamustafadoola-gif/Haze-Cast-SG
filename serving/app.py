@@ -51,6 +51,23 @@ def health():
     return {"status": "ok"}
 
 
+_SOURCES_CACHE: dict = {}
+
+
+@app.get("/health/sources")
+def source_status():
+    """How fresh each upstream source is (PM2.5, weather per point, fire counts), so the dashboard
+    can say which source is holding a forecast back. Cached for a minute; it reads silver."""
+    from datetime import datetime, timezone
+    from hazecast.model_monitor import source_health
+    now = datetime.now(timezone.utc)
+    cached = _SOURCES_CACHE.get("value")
+    if cached is None or (now - _SOURCES_CACHE["at"]).total_seconds() > 60:
+        cached = {"checked_at": now.isoformat(), "sources": source_health(now)}
+        _SOURCES_CACHE.update(value=cached, at=now)
+    return cached
+
+
 @app.get("/forecast")
 def get_forecast():
     """Return the latest next-day (daily-mean) forecast for all regions."""

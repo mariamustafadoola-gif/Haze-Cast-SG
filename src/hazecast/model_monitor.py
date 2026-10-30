@@ -415,15 +415,19 @@ def stuck_feeds(window: pd.DataFrame) -> dict[str, int]:
 def source_health(now, silver_dir: Path = SILVER_DIR) -> dict:
     """Age of the newest data from each upstream source (live runs only), so a failure points
     at the source that caused it. PM2.5 and weather older than FEATURE_MAX_AGE_HOURS is an
-    alert; fire detections older than the trust window mean the carry-forward is in use
-    (warn), and older than trust + carry-forward mean forecasts have stopped (alert)."""
+    alert. For fires the age is measured from the hour fire counts are known to (the end of
+    the silver grid: 15 h after the last detection, or later if FIRMS reports those hours as
+    processed), not from the last detection, so a quiet spell with no fires is not a stale
+    feed. Beyond FIRE_LATENCY_HOURS + 1 the carry-forward is in use (warn); beyond that plus
+    FIRE_CARRY_FORWARD_HOURS forecasts have stopped (alert)."""
     now_sgt = pd.Timestamp(timestamp(now)).tz_convert(SGT).tz_localize(None)
     out = {}
 
     def entry(newest, alert_after, warn_after=None, **extra):
         if newest is None or pd.isna(newest):
             return dict(newest=None, age_hours=None, status="alert", **extra)
-        age = (now_sgt - pd.Timestamp(newest)).total_seconds() / 3600
+        # never negative: fire counts can be known a few hours ahead of now (the 15 h trust window)
+        age = max(0.0, (now_sgt - pd.Timestamp(newest)).total_seconds() / 3600)
         status = "alert" if age > alert_after else "warn" if warn_after is not None and age > warn_after else "ok"
         return dict(newest=str(newest), age_hours=age, status=status, **extra)
 
@@ -439,10 +443,15 @@ def source_health(now, silver_dir: Path = SILVER_DIR) -> dict:
     out["pm25"] = entry(newest("pm25.parquet"), C.FEATURE_MAX_AGE_HOURS)
     for point in WEATHER_POINTS:
         out[f"weather_{point}"] = entry(newest("weather.parquet", point=point), C.FEATURE_MAX_AGE_HOURS)
-    grid_end = newest("firms_hourly.parquet")
-    last_detection = None if grid_end is None else pd.Timestamp(grid_end) - pd.Timedelta(hours=C.FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION)
-    out["fires"] = entry(last_detection, C.FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION + C.FIRE_CARRY_FORWARD_HOURS,
-                         warn_after=C.FIRE_KNOWN_HOURS_AFTER_LAST_DETECTION)
+    known_to = newest("firms_hourly.parquet")
+    lag = C.FIRE_LATENCY_HOURS + 1          # the features at hour t use counts up to t - lag
+    try:
+        grid = pd.read_parquet(Path(silver_dir) / "firms_hourly.parquet", columns=["ts", "total"])
+        last_detection = grid.loc[grid.total > 0, "ts"].max()
+    except (FileNotFoundError, OSError, KeyError, ValueError):   # pyarrow's ArrowInvalid is a ValueError
+        last_detection = None
+    out["fires"] = entry(known_to, lag + C.FIRE_CARRY_FORWARD_HOURS, warn_after=lag,
+                         last_detection=None if last_detection is None or pd.isna(last_detection) else str(last_detection))
     return out
 
 
