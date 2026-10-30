@@ -108,21 +108,37 @@ def pickle_modules(path: Path) -> set[str]:
     return mods
 
 
+def _refit_as_trained(name: str, entry: dict, train: pd.DataFrame, cols: list[str], target: str, horizon: int):
+    """Refit one manifest choice as it was trained. xgboost_q85's quantile is a setting that differs
+    between branches (0.85 on the main line, 0.95 or a per-cell table on the tuned branches), so it
+    comes from the entry's recorded quantile_alpha (manifests from before it was recorded used the
+    flat XGB_QUANTILE_ALPHA), never from the running branch's config. Without this, a tuned branch
+    would refit the champion with the challenger's quantile and compare the challenger with itself."""
+    import inspect
+    from hazecast.hourly_model import _fit
+    if name == "xgboost_q85":
+        from xgboost import XGBRegressor
+        alpha = entry.get("quantile_alpha") or C.XGB_QUANTILE_ALPHA
+        model = XGBRegressor(**{**C.XGB_PARAMS, "objective": "reg:quantileerror", "quantile_alpha": alpha})
+        return model.fit(train[cols], train[f"label_{target}"])
+    takes_horizon = "horizon" in inspect.signature(_fit).parameters   # tuned branches pass the horizon
+    return _fit(name, train, cols, target, horizon) if takes_horizon else _fit(name, train, cols, target)
+
+
 def _paired_champion_scores(gold: pd.DataFrame, champion: dict, candidate: dict) -> dict:
     """Refit the champion's chosen model per group on the challenger's pre-holdout rows (current
     features) and score it on the challenger's holdout. Returns {"t|h": metrics} for groups whose
     holdout has elevated hours; the champion's production artifacts are never used (they were
     refitted on all labels, holdout included)."""
-    import inspect
-    from hazecast.hourly_model import _labelled, _feature_columns, _complete, _before, _fit, _predict
+    from hazecast.hourly_model import _labelled, _complete, _before, _predict
     from hazecast.train import _metrics
-    takes_horizon = "horizon" in inspect.signature(_fit).parameters   # tuned branch passes the horizon
     out = {}
     for h in HORIZONS:
         lab = _labelled(gold, h)
         cols = candidate["feature_columns"]
         for t in TARGETS:
-            name = ((champion.get("models", {}).get(str(h), {}).get(t)) or {}).get("model")
+            champ_entry = (champion.get("models", {}).get(str(h), {}).get(t)) or {}
+            name = champ_entry.get("model")
             entry = candidate["models"][str(h)][t]
             if not name:
                 continue
@@ -132,7 +148,7 @@ def _paired_champion_scores(gold: pd.DataFrame, champion: dict, candidate: dict)
             train, test = _before(rows, start, h), rows.loc[rows.date >= start]
             if test.empty or (test[f"label_{t}"] >= float(candidate["threshold"])).sum() == 0:
                 continue
-            est = _fit(name, train, cols, t, h) if takes_horizon else _fit(name, train, cols, t)
+            est = _refit_as_trained(name, champ_entry, train, cols, t, h)
             out[f"{t}|{h}"] = dict(model=name, **_metrics(test[f"label_{t}"], _predict(est, test, cols, t)))
     return out
 
@@ -142,8 +158,7 @@ def _recent_window_check(gold: pd.DataFrame, candidate: dict, ledger_path: Path)
     RECENT_WINDOW_DAYS? Its model choices are refitted on rows whose labels precede the window
     (its production artifacts saw the window) and scored on the served forecasts' hours, pooled
     over the targets per horizon. Judged only with MIN_ELEVATED_FOR_RECALL haze hours or more."""
-    import inspect
-    from hazecast.hourly_model import _labelled, _complete, _before, _fit, _predict
+    from hazecast.hourly_model import _labelled, _complete, _before, _predict
     from hazecast.model_monitor import matched_forecasts
     from hazecast.pipeline_store import connect
     from hazecast.train import _metrics
@@ -161,7 +176,6 @@ def _recent_window_check(gold: pd.DataFrame, candidate: dict, ledger_path: Path)
         matched = matched_forecasts(db, start.to_pydatetime(), end.to_pydatetime())
     finally:
         db.close()
-    takes_horizon = "horizon" in inspect.signature(_fit).parameters
     cols, thr = candidate["feature_columns"], float(candidate["threshold"])
     horizons, failures = {}, []
     for h, g in matched.groupby("horizon_hours"):
@@ -174,10 +188,10 @@ def _recent_window_check(gold: pd.DataFrame, candidate: dict, ledger_path: Path)
         boundary = origins.min()
         challenger = np.full(len(g), np.nan)
         for t in g.region.unique():
-            name = candidate["models"][str(h)][t]["model"]
+            entry = candidate["models"][str(h)][t]
             rows = _complete(lab, cols, t, h)
             train = _before(rows, boundary, h)
-            est = _fit(name, train, cols, t, h) if takes_horizon else _fit(name, train, cols, t)
+            est = _refit_as_trained(entry["model"], entry, train, cols, t, h)
             sel = (g.region == t).to_numpy()
             at = lab.set_index("date").reindex(origins[sel])
             ok = np.isfinite(at[cols].to_numpy(dtype=float)).all(axis=1)

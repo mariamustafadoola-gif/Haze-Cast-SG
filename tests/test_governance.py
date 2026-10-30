@@ -125,3 +125,16 @@ def test_champion_is_rescored_like_for_like_when_the_holdout_has_haze(tmp_path):
     assert grp["champion_f2"] != grp["champion_f2_recorded"]          # recorded 0.99 no longer used
     assert r["checks"]["no_regression"]["champion_compared_like_for_like"] == 18
     assert "groups_beating_persistence" in r["checks"]["skill"]
+
+
+def test_champion_is_refitted_with_its_own_quantile_not_the_running_branchs():
+    import numpy as np
+    from hazecast import config as C
+    from hazecast.governance import _refit_as_trained
+    rng = np.random.default_rng(0)
+    rows = pd.DataFrame({"x": rng.normal(size=300), "now_north": rng.normal(size=300)})
+    rows["label_north"] = rows.x * 3
+    recorded = _refit_as_trained("xgboost_q85", {"quantile_alpha": 0.6}, rows, ["x", "now_north"], "north", 6)
+    assert recorded.get_params()["quantile_alpha"] == 0.6
+    legacy = _refit_as_trained("xgboost_q85", {}, rows, ["x", "now_north"], "north", 6)   # manifests before it was recorded
+    assert legacy.get_params()["quantile_alpha"] == C.XGB_QUANTILE_ALPHA
