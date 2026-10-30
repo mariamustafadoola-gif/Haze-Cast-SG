@@ -33,7 +33,7 @@ same pull request.
 |---|---|---|
 | `hazecast_backfill` | manual | Downloads any missing history (2014-04 onwards) from data.gov.sg, Open-Meteo and NASA FIRMS, rebuilds bronze/silver/gold, triggers `hazecast_retrain` |
 | `hazecast_hourly` | :10 every hour | Live fetch, then bronze/silver/gold, then a **freshness gate** (newest complete feature row ≤ 2 h old), then archives 18 forecasts. Stale features mean **no forecast** (the run is skipped, not failed) |
-| `hazecast_monitoring` | 01:30 daily | Makes the last 10 days of raw data permanent, fetches NEA actuals, runs the four monitors, rebuilds the dashboard, applies the **retraining rule** (§5) and branches |
+| `hazecast_monitoring` | 01:30 daily | Makes the last 10 days of raw data permanent, fetches NEA actuals, runs the five monitors, rebuilds the dashboard, applies the **retraining rule** (§5) and branches |
 | `hazecast_retrain` | 03:00 on the 1st, or triggered | Trains a challenger in staging, replays its holdout, runs the **promotion gate** (§6), promotes it or keeps the champion, then refreshes the monitoring baseline |
 
 ## 4. What is monitored (`hazecast.model_monitor`)
@@ -48,25 +48,32 @@ How every threshold was derived, with the replay evidence, is in
 
 | Monitor | Question | Metrics | Alert when |
 |---|---|---|---|
-| **Data quality** (30-day window) | Are the model's inputs still healthy and like the training data? | schema, freshness, missing rate, share outside training range, **PSI** vs training deciles | missing column or features > 3 h old (*fail*); ≥ 3 features above their **calibrated PSI limit** (99th percentile of PSI over normal 30-day windows of the training period); missing rate +5 pp or > 5 % out of range |
+| **Data quality** (30-day window) | Are the model's inputs still healthy and like the training data? | schema, freshness, missing rate, share outside training range, stuck PM2.5 feeds, age of each upstream source (live), and **CSI** (characteristic stability index: PSI of each feature) against the **same monsoon season** in the training years | *fail*: missing column, features > 3 h old, a source past its limit (PM2.5 or weather > 3 h; fire detections > 39 h, i.e. past the 15 h trust window and the 24 h carry-forward), or a region's PM2.5 unchanged for ≥ 12 h. *Alert*: ≥ 3 features beyond **both** their calibrated CSI limit (99th percentile over normal 30-day windows of that season in the training period) and their all-season PSI limit; missing rate +5 pp or > 5 % out of range |
+| **Stability** (30-day window) | Is the model's output still distributed as it was in this season? | **PSI** (population stability index) of each model's forecasts against its forecasts on the same season in the training years | ≥ 3 of 18 models above their calibrated PSI limit (99th percentile over normal windows of that season). Works without actuals, so it reacts before accuracy can be judged |
 | **Model quality** (7-day window) | Are forecasts still doing their job, verified against NEA? | MAE, RMSE, F2, recall, MAE skill and **recall of persistence on the same hours** | with ≥ 48 matched hours: MAE > 1.5 × holdout MAE, *or* (with ≥ 12 haze hours) recall more than 0.25 below persistence's. Alert at ≥ 3 of 18 groups. MAE skill vs persistence is reported, not alerted: the q85 models are upward-biased by design |
 | **Bias drift** (7-day window) | Is any region (or time of day) served systematically worse? | per-region recall, mean signed error, alert rate vs actual rate; day vs night MAE | recall gap between regions (each ≥ 12 haze hours) > 0.30, or > 0.20 wider than at training; a region's mean signed error shifts > 8 µg/m³ |
 | **Feature attribution drift** (30-day window) | Has what the model relies on changed? | label-free permutation attribution; **NDCG@10** vs baseline ranking | NDCG below the model's **calibrated limit** (1st percentile over training-period windows, at most 0.90). Alert at ≥ 3 of 18 models |
 
 Two kinds of monitoring are kept separate on purpose. `hazecast.monitoring`
 verifies archived forecasts against NEA actuals; `hazecast.model_monitor`
-adds the drift and bias views and makes the retraining decision.
+adds the drift, stability and bias views and makes the retraining decision.
+
+**Seasonality.** Singapore's year has four monsoon seasons (`MONSOON_SEASONS`:
+NE monsoon Dec–Mar, inter-monsoon Apr–May, SW monsoon Jun–Sep, inter-monsoon
+Oct–Nov), and the inputs move with them.
+- **In the model:** season enters through the drivers (fire counts, wind, rain, upwind alignment). Adding explicit seasonal inputs did not help on the 2024–26 holdout (`experiments/seasonality_features.py`): day of year lowered F2 from 0.655 to 0.630, monsoon phase moved it by 0.002 (noise), wind direction by −0.003. Outside the 2026 haze the model is calibrated in every season (q85 coverage 0.83–0.86 against a target of 0.85, no false alarms).
+- **In monitoring:** CSI and PSI compare each 30-day window with the same season in the training years, with limits calibrated per season. A feature counts as drifted only when it is unusual both for its season and against all training months. In the holdout replay this cut drift-only investigate weeks from 8 (all-season only) to 5, while season-matched CSI alone gave 16; all three gave a warning by 10 Aug 2026, ahead of the haze (walkthrough §4.2).
 
 ## 5. Retraining triggers: when to refresh the model
 
-The monitoring DAG turns the four monitor results into one action
+The monitoring DAG turns the five monitor results into one action
 (`model_monitor.governance_decision`):
 
 | Action | Rule | What happens |
 |---|---|---|
-| **fix_data** | data-quality *fail*: missing feature columns or stale features | No retraining: a model retrained on broken data would be worse. Data owner investigates the failing source (§7). Inference is already refusing stale features |
-| **retrain** | model-quality *alert* (≥ 3 groups), **or** data drift **together with** attribution drift, **or** the champion is older than 35 days | `hazecast_retrain` is triggered automatically; the promotion gate still decides whether anything changes |
-| **investigate** | any other *alert*: drift alone, attribution drift alone, bias drift | ML owner reviews the dashboard within 2 working days and decides retrain / threshold change / no-op, recording why |
+| **fix_data** | data-quality *fail*: missing feature columns, stale features, a source past its age limit, or a stuck PM2.5 feed | No retraining: a model retrained on broken data would be worse. Data owner investigates the failing source (§7) following the data-incident SOP (§10). Inference is already refusing stale features |
+| **retrain** | model-quality *alert* (≥ 3 groups), **or** data drift (CSI) or unstable forecasts (PSI) **together with** attribution drift, **or** the champion is older than 35 days | `hazecast_retrain` is triggered automatically; the promotion gate still decides whether anything changes |
+| **investigate** | any other *alert*: drift alone, unstable forecasts alone, attribution drift alone, bias drift | ML owner reviews the dashboard within 2 working days and decides retrain / threshold change / no-op, recording why |
 | **none** | no alerts (warnings are shown on the dashboard only) | nothing |
 
 Evidence from replaying the 2024–26 holdout (117 weekly windows):
@@ -145,3 +152,43 @@ frozen unless they fix a model-quality alert.
 - Fire features use only detections FIRMS has delivered (rolling windows ending 3 h before each hour), and are trusted up to 15 h after the latest detection. If FIRMS is late, the last known fire features are carried forward for up to 24 h, and each forecast records this in `fire_carried_hours`. After that, forecasts pause rather than reading an outage as "no fires" (walkthrough §2.7).
 - The daily (next-day) product still uses calendar-day fire counts, including the current day's incomplete count at 23:30. This look-ahead issue is open for that product only.
 - Thresholds are calibrated on one replay (one out-of-time haze season). Revisit them after the first live haze season; the drift limits are recomputed from the training data with every new baseline.
+
+## 10. Data incidents: upstream outages and ingestion changes
+
+A data incident is any period in which an input is missing, late, frozen,
+malformed or means something different from what the model was trained on.
+Three rules apply to every incident:
+1. **Never serve a forecast from bad inputs.** The freshness gate skips the hourly run, and the dashboard says the forecast is old. A gap is better than a wrong number.
+2. **Never retrain on suspect data.** The monitor answers `fix_data`, not `retrain`. Promotions are frozen until the incident is closed.
+3. **Close every incident with a check.** Backfill, confirm the layers, replay the monitors, write a short note.
+
+### 10.1 Scenarios
+
+| Scenario | Detected by | What the pipeline does by itself | Owner action | Retrain? |
+|---|---|---|---|---|
+| **Source API down** (NEA, Open-Meteo or FIRMS returns errors or nothing) | `fetch_live` task failure or retry; source age (`source_age_hours`) past its limit; freshness gate | Skips forecasts once the newest complete row is > 2 h old. Fire data: carried forward up to 24 h, labelled | Data owner: check the provider's status page and our key; wait or switch to the provider's alternative endpoint; the nightly top-up backfills automatically once it is back | No |
+| **Late delivery** (FIRMS satellite pass hours late; 28 Oct 2026: > 10 h) | `fires` source in *warn* (past the 15 h trust window); `fire_carried_hours` > 0 on forecasts and the dashboard | Carries fire features forward up to 24 h, labels each forecast, then pauses | None under 24 h; note it if over 12 h. Over 24 h: as "API down" | No |
+| **Partial delivery** (a region, a weather point or a satellite missing) | Missing rate up > 5 pp for that feature; a weather point's source age past its limit | Feature row incomplete → no forecast once the gap reaches the newest row | Data owner: re-fetch that source; check whether the provider dropped a station or point | No |
+| **Frozen values** (a feed repeating the last reading) | `stuck_feed`: a region's PM2.5 unchanged for ≥ 12 h (never in 12 years of real data; longest genuine run 11 h) | Monitor answers `fix_data` | Data owner: confirm against NEA's website; record the affected hours so they are excluded from training labels | Only after the hours are excluded |
+| **Schema or format change** (renamed field, new file layout, API version) | Ingestion parse error; `missing_columns` in the monitor | Task fails; no forecast; `fix_data` | Data owner: adapt the parser, add a test with a sample of the new format, backfill | No |
+| **Meaning change** (station moved, units or scaling changed, weather model upgraded, new satellite or product version) | Step change in the CSI of one source's features, values out of training range, while other sources are stable; model quality may follow | Drift alert → `investigate` (or `retrain` if attribution drift agrees) | ML owner and data owner: confirm the change with the provider; align the new data to the old (or rebuild history consistently); then retrain through the normal gate (change process) | Yes, after history is consistent |
+| **Revisions** (provider corrects recent values) | Values in the ledger's actuals table updated (`source_updated_at`) | Re-fetches the last 2 days of weather on every top-up; newest values win | None; model quality for affected hours is recomputed automatically | No |
+| **Our own ingestion bug** (a code change breaks a feature) | Tests in CI; `missing_columns`, out-of-range share or a CSI step on the day of a deploy | `fix_data` or drift alert | Author: revert or fix the change; replay the monitors; models are unaffected unless they were retrained on the bad data (then roll back) | No (roll back if a retrain used the bad data) |
+| **Expired key or rate limit** | `fetch_live` 401/429 errors; source age rising | As "API down" | Data owner: rotate the key in `.env`, restart the stack, confirm the next hourly run | No |
+| **Time-zone or timestamp shift** | Model quality drops sharply while CSI is calm; actual and forecast series offset on the dashboard | Model-quality alert → a retrain is triggered, which must not be promoted on shifted data | ML owner: compare raw timestamps with the source's website before the gate result is accepted; fix the parser, rebuild the layers | No (reject the triggered challenger) |
+
+### 10.2 Severity and response
+
+| Severity | Meaning | Examples | Response |
+|---|---|---|---|
+| **S1** | No forecasts, or wrong data being served | API down > 2 h, stuck feed, timestamp shift | Data owner the same day (within 2 h during an active haze episode); team channel told |
+| **S2** | Forecasts continue in a degraded way | Fire data carried forward, one weather point late, partial delivery | Data owner within 1 working day |
+| **S3** | No effect on forecasts | Revision of past values, a warning on the dashboard | Weekly review |
+
+### 10.3 Closing an incident
+
+1. The source is back: the newest complete gold row is fresh and every source shows *ok*.
+2. Backfill: the nightly top-up repairs the last 10 days; longer gaps need `hazecast_backfill`.
+3. Verify: bronze and silver have no missing or duplicate hours for the period; the dashboard's actual series matches the provider's website for a sample of hours.
+4. Replay: run the monitor for the affected windows; no remaining `fix_data`.
+5. Record: what happened, how long, which hours are excluded from training (if any), and what was changed. Lift the promotion freeze.

@@ -7,7 +7,9 @@ over time:
   1. governance decision per monitoring window
   2. forecast vs actual (national, +6 h)
   3. model quality: MAE and skill vs persistence per horizon, F2 on elevated hours
-  4. data quality: PSI per feature (heatmap) and number of drifted features
+  4. stability: CSI of each feature and PSI of each model's forecasts against the same
+     monsoon season in the training years, as a share of their calibrated limits, and the
+     number of features / models beyond their limit (monsoon seasons shaded)
   5. bias drift: recall gap across regions, mean signed error per region
   6. feature attribution drift: NDCG@k vs baseline
 
@@ -28,8 +30,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from hazecast.config import MONITORING_DIR, PM25_ELEVATED_THRESHOLD, PSI_ALERT, SG_REGIONS
-from hazecast.model_monitor import REPORTS_DIR
+from hazecast.config import MONITORING_DIR, MONSOON_SEASONS, PM25_ELEVATED_THRESHOLD, SG_REGIONS
+from hazecast.model_monitor import REPORTS_DIR, season_of
 
 log = logging.getLogger(__name__)
 
@@ -85,6 +87,24 @@ def _line(fig, x, y, name, color, dash=None, markers=False, hover_fmt=".2f"):
 
 def _metric(metrics: pd.DataFrame, monitor: str, metric: str) -> pd.DataFrame:
     return metrics.loc[(metrics.monitor == monitor) & (metrics.metric == metric)]
+
+
+def _season_bands(fig, dates: pd.Series) -> None:
+    """Shade the two monsoons lightly and label every season span, so stability can be read
+    against the season it is judged in (each window is compared with the same season in training)."""
+    if dates.empty:
+        return
+    days = pd.date_range(dates.min().normalize(), dates.max().normalize() + pd.Timedelta(days=1), freq="D")
+    seasons = pd.Series(season_of(days), index=days)
+    spans = (seasons != seasons.shift()).cumsum()
+    for _, span in seasons.groupby(spans):
+        name, start, end = span.iloc[0], span.index[0], span.index[-1] + pd.Timedelta(days=1)
+        if "monsoon" in name and "Inter" not in name:
+            fig.add_vrect(x0=start, x1=end, fillcolor=GRID, opacity=0.45, line_width=0, layer="below")
+        if (end - start).days >= 45:
+            fig.add_annotation(x=start + (end - start) / 2, y=0.99, yref="paper", yanchor="top", showarrow=False,
+                               text=name.replace(" monsoon", "").replace("Inter-monsoon", "Inter"),
+                               font=dict(size=10, color=INK_2))
 
 
 def figures(metrics: pd.DataFrame, runs: pd.DataFrame, series: pd.DataFrame) -> list:
@@ -143,22 +163,46 @@ def figures(metrics: pd.DataFrame, runs: pd.DataFrame, series: pd.DataFrame) -> 
             figs.append(_layout(fig, "F2 on elevated hours, national (only windows with elevated hours)", "F2",
                                 yaxis_range=[0, 1.02]))
 
-    psi = _metric(metrics, "data_quality", "psi")
-    if not psi.empty:
-        top = psi.groupby("feature").value.max().sort_values(ascending=False).head(15).index
-        grid = psi.loc[psi.feature.isin(top)].pivot_table(index="feature", columns="window_end", values="value")
+    csi = _metric(metrics, "data_quality", "csi_ratio")
+    if not csi.empty:
+        top = csi.groupby("feature").value.max().sort_values(ascending=False).head(15).index
+        grid = csi.loc[csi.feature.isin(top)].pivot_table(index="feature", columns="window_end", values="value")
         grid = grid.loc[list(top)[::-1]]
-        fig = go.Figure(go.Heatmap(z=grid.values, x=grid.columns, y=grid.index, zmin=0, zmax=max(1.0, PSI_ALERT * 2),
+        fig = go.Figure(go.Heatmap(z=grid.values, x=grid.columns, y=grid.index, zmin=0, zmax=1.5,
                                    colorscale=[[i / (len(SEQUENTIAL) - 1), c] for i, c in enumerate(SEQUENTIAL)],
-                                   xgap=1, ygap=1, colorbar=dict(title="PSI", thickness=12),
-                                   hovertemplate="%{y}<br>%{x|%d %b %Y}<br>PSI %{z:.2f}<extra></extra>"))
-        figs.append(_layout(fig, "Data drift: PSI vs training data over 30-day windows, 15 most-drifted features",
+                                   xgap=1, ygap=1, colorbar=dict(title="CSI / limit", thickness=12),
+                                   hovertemplate="%{y}<br>%{x|%d %b %Y}<br>CSI at %{z:.0%} of its limit<extra></extra>"))
+        figs.append(_layout(fig, "Feature stability (CSI) against the same season in training, as a share of each "
+                                 "feature's calibrated limit (1 = alert); 15 least stable features",
                             "", height=460, hovermode="closest"))
-        n = _metric(metrics, "data_quality", "n_psi_alert")
+
+    psi = _metric(metrics, "stability", "psi_ratio")
+    if not psi.empty:
         fig = go.Figure()
-        _line(fig, n.window_end, n.value, "Features beyond calibrated PSI limit", SERIES[0], hover_fmt=".0f")
-        figs.append(_layout(fig, "Number of features beyond their calibrated PSI limit (99th pct of normal "
-                                 "training months)", "Features", height=280))
+        for h, g in psi.groupby("horizon_hours"):
+            med = g.groupby("window_end").value.median()
+            _line(fig, med.index, med.values, f"+{h} h median", HORIZON_COLOR.get(h, SERIES[3]), hover_fmt=".2f")
+        worst = psi.groupby("window_end").value.max()
+        _line(fig, worst.index, worst.values, "least stable model", SERIES[7], dash="dot", hover_fmt=".2f")
+        fig.add_hline(y=1, line=dict(color=INK_2, width=1, dash="dash"), annotation_text="limit",
+                      annotation_position="top left")
+        _season_bands(fig, psi.window_end)
+        figs.append(_layout(fig, "Forecast stability (PSI) of each model's forecasts against its forecasts in the same "
+                                 "season in training, as a share of its calibrated limit", "PSI / limit"))
+
+    n = _metric(metrics, "data_quality", "n_csi_alert")
+    n = n if not n.empty else _metric(metrics, "data_quality", "n_psi_alert")
+    m = _metric(metrics, "stability", "n_psi_alert")
+    if not n.empty or not m.empty:
+        fig = go.Figure()
+        _line(fig, n.window_end, n.value, "Features drifted (beyond both their CSI and PSI limits)", SERIES[0],
+              hover_fmt=".0f")
+        _line(fig, m.window_end, m.value, "Models beyond their PSI limit", SERIES[1], hover_fmt=".0f")
+        fig.add_hline(y=3, line=dict(color=INK_2, width=1, dash="dash"), annotation_text="alert at 3",
+                      annotation_position="top left")
+        _season_bands(fig, pd.concat([n.window_end, m.window_end]))
+        figs.append(_layout(fig, "Stability alerts: features (of 36) and models (of 18) beyond their calibrated limit",
+                            "Count", height=300))
 
     gap = _metric(metrics, "bias_drift", "recall_gap")
     if not gap.empty:
@@ -203,10 +247,16 @@ def _latest_table(metrics: pd.DataFrame, runs: pd.DataFrame) -> str:
     cols = [c for c in ("region", "horizon_hours", "n", "mae", "persistence_mae", "skill", "f2") if c in qt]
     qrows = "".join("<tr>" + "".join(f"<td>{_fmt(r[c])}</td>" for c in cols) + "</tr>" for _, r in qt[cols].iterrows())
     color, label = STATUS.get(last.action, (INK_2, last.action))
+    src = metrics.loc[(metrics.window_end == last.window_end) & (metrics.metric == "source_age_hours")]
+    srows = "".join(f"<tr><td>{html.escape(r.feature.replace('_', ' '))}</td><td>{r.value:.1f} h</td>"
+                    f"<td>{html.escape(str(r.status))}</td></tr>" for r in src.itertuples())
+    season = season_of(pd.Series([last.window_end]))[0]
     return (f"<div class='decision'><span class='dot' style='background:{color}'></span>"
-            f"<b>{html.escape(label)}</b> &middot; window ending {last.window_end:%d %b %Y %H:%M} SGT</div>"
+            f"<b>{html.escape(label)}</b> &middot; window ending {last.window_end:%d %b %Y %H:%M} SGT"
+            f" &middot; {html.escape(season)}</div>"
             f"<ul>{''.join(f'<li>{html.escape(r)}</li>' for r in reasons)}</ul>"
             f"<table><tr><th>Monitor</th><th>Status</th></tr>{rows}</table>"
+            + (f"<table><tr><th>Upstream source</th><th>Newest data</th><th>Status</th></tr>{srows}</table>" if srows else "")
             + (f"<details><summary>Model quality in this window (table view)</summary><table><tr>"
                f"{''.join(f'<th>{c}</th>' for c in cols)}</tr>{qrows}</table></details>" if qrows else ""))
 

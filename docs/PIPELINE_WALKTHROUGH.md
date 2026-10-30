@@ -572,22 +572,46 @@ Two deployment bugs surfaced only in this run, and both are fixed:
 
 A **baseline** (`monitoring_baseline.json`, next to the champion's
 manifest) is written after every promotion. It contains:
-- per-feature training statistics and decile bins;
+- per-feature training statistics and decile bins, overall and **per monsoon season**;
+- each model's forecast distribution on the training data (deciles), overall and per season;
 - each model's feature attribution on a 3,000-row training sample;
 - holdout quality and per-region bias;
-- **calibrated limits** (§4.3).
+- **calibrated limits** (§4.3), the stability limits per season.
 
 Each day the monitors compare recent data against it:
 
 | Monitor | Window | Computation |
 |---|---|---|
-| **Data quality** | last **30 days** of hourly gold | Schema: every model feature present. Freshness: newest complete row ≤ 3 h old. Per feature: missing rate vs training, share outside training min/max, and **PSI** = Σ (aᵢ − eᵢ) · ln(aᵢ / eᵢ) over the training deciles (ε = 1e-4) |
+| **Data quality** | last **30 days** of hourly gold | Schema: every model feature present. Freshness: newest complete row ≤ 3 h old. Upstream sources (live): age of the newest PM2.5, weather (per point) and fire detection. Stuck feeds: a region's PM2.5 unchanged for ≥ 12 h. Per feature: missing rate vs training, share outside training min/max, and **CSI** (characteristic stability index) = Σ (aᵢ − eᵢ) · ln(aᵢ / eᵢ) over the training deciles (ε = 1e-4), where e is the feature's distribution **in the same monsoon season** of the training years. The all-season value is still reported |
+| **Stability** | last 30 days | **PSI** (population stability index) of each of the 18 models' forecasts: the same formula over the deciles of that model's forecasts on the training data, again against the same season. It needs no actuals, so it shows whether the model's output is stable before accuracy can be judged |
 | **Model quality** | last **7 days** of forecasts with NEA actuals (ledger join on target time and region) | per region × horizon: MAE, RMSE, F2, recall, MAE skill vs persistence, **persistence's recall on the same hours**, MAE ÷ holdout MAE |
 | **Bias drift** | last 7 days, matched | facets = the 5 regions, plus day (07–18) vs night: per-region recall, mean signed error, alert rate − actual rate; **recall gap** (best − worst region, regions with ≥ 12 haze hours) |
 | **Feature attribution drift** | last 30 days | label-free **permutation attribution**: shuffle one feature and measure the mean absolute change in the model's prediction, normalised to sum 1. This works for every candidate type and needs no labels, so it can run before actuals arrive. Then **NDCG@10** of the current ranking, using the baseline attributions as relevance (the measure SageMaker Clarify uses) |
 
+**Why season-matched, and why drift needs both indices.** Singapore's
+inputs move with the monsoons (`MONSOON_SEASONS`: NE Dec–Mar, inter-monsoon
+Apr–May, SW Jun–Sep, inter-monsoon Oct–Nov). A window's season is that of
+its middle hour; its CSI and PSI limits come from training-period windows
+of the same season. Three drift rules were replayed over the holdout:
+
+| A feature counts as drifted when it is beyond… | Drift-only investigate weeks | Not followed by degradation | First warning before the 2026 haze |
+|---|---|---|---|
+| its all-season PSI limit (the earlier rule) | 8 | 5 | 10 Aug |
+| its season-matched CSI limit | 16 | 12 | 3 Aug |
+| **both** (the rule used) | **5** | **2** | **10 Aug** |
+
+The all-season reference flags normal seasonal swings; the season-matched
+reference is stricter and also flags years that were merely unusual for
+their season (Feb and May–June 2026). Requiring both keeps the warning
+and drops most of the noise.
+The model itself needs no calendar input: season reaches it through its
+drivers, explicit seasonal inputs did not help on the holdout
+(`experiments/seasonality_features.py`: day of year F2 0.655 → 0.630,
+monsoon phase +0.002), and outside the 2026 haze it is calibrated in every
+season (q85 coverage 0.83–0.86, no false alarms).
+
 The mapping to the brief's "monitor data quality / model quality / bias
-drift / feature attribution drift" is one-to-one. Every metric for every
+drift / feature attribution drift" is one-to-one, plus stability (PSI and CSI). Every metric for every
 window goes into the `monitor_metrics` and `monitor_runs` tables of the
 ledger. `hazecast.dashboard` plots them over time, together with forecast
 vs actual: performance and stability across any time period.
@@ -612,6 +636,10 @@ Each threshold below was then set against the real behaviour:
 | Drift window `DRIFT_WINDOW_DAYS` | 30 days | a week of daily-updating fire features is ~7 independent values, too few to compare distributions |
 | **Per-feature PSI limit** | alert above the **99th percentile** of PSI over 120 random 30-day windows *from the training period*, warn above the 95th (floors 0.25 / 0.10) | "Unlike any normal month the model was trained on", whatever the feature's natural variability. The calibrated limits span ~0.3 (hourly rain) to ~8.2 (fire counts), which shows why one fixed number can't work |
 | `PSI_ALERT_MIN_FEATURES` | 3 | a single feature in alert was usually Riau wind speed (26 of 117 windows: monsoon variation, no performance impact); 3 at once is a broader shift |
+| **Season-matched CSI limit** | per feature and season: 99th percentile (warn 95th) of CSI over up to 40 training-period windows of that season (`SEASON_NULL_WINDOWS`), floors 0.25 / 0.10. Since 30 Oct a feature counts toward the drift count only when it is beyond **both** this limit and its all-season PSI limit | the same calibration as above, but "unlike this season in past years". Either reference alone was noisier in the replay (8 and 16 drift-only weeks); both together gave 5 with the same lead before the haze (§4.2) |
+| **Forecast PSI limit** and `STABILITY_ALERT_MIN_MODELS` | per model and season, calibrated the same way; alert at ≥ 3 of 18 models | as for attribution, one model can move on noise; 3 is a pattern |
+| `PM25_STUCK_HOURS` | 12 identical hourly values | in 12 years no region repeated a value for more than 11 h (47 runs of 6 h or more), so 12 means a frozen feed, not clean air |
+| Source age limits | PM2.5 and weather 3 h; fire detections 15 h (*warn*, carry-forward in use) and 39 h (*alert*, forecasts stopped) | the hourly freshness limits, and the fire trust window plus the 24 h carry-forward |
 | **Per-model NDCG limit** | alert below the **1st percentile** of NDCG over 30 training-period windows (warn: 5th), capped at 0.90 | calibrated limits range 0.58–0.90 by model; normal weeks had a median of 0.94 and the 2026 haze 0.75, so the limit separates them |
 | Attribution / quality group count | ≥ 3 of 18 | one group can flip on noise; 3 is a pattern |
 | `MODEL_MAE_RATIO_ALERT` | 1.5 × holdout MAE | in the replay, the weekly MAE ratio was 0.84–0.90 at the median and **1.09–1.14 at p90**, so 1.5 is well outside normal variation |

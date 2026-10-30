@@ -365,6 +365,17 @@ HOURLY_TIMEZONE = "Asia/Singapore"
 # docs/MODEL_GOVERNANCE.md). Starting values, not tuned facts: review them
 # after the first haze season of live monitoring.
 # ---------------------------------------------------------------------------
+# Singapore's monsoon seasons (Meteorological Service Singapore). Stability is judged against
+# the same season in the training years (CSI per feature, PSI per model's forecasts). A feature
+# counts as drifted only if it is unusual both for its season and against all training months:
+# in the holdout replay that cut drift-only "investigate" weeks from 8 (all-season only) to 5,
+# with the same 10 Aug 2026 warning ahead of the haze (season-matched only: 16).
+MONSOON_SEASONS = {
+    "NE monsoon": [12, 1, 2, 3],
+    "Inter-monsoon 1": [4, 5],
+    "SW monsoon": [6, 7, 8, 9],
+    "Inter-monsoon 2": [10, 11],
+}
 MONITOR_WINDOW_DAYS = 7            # performance window: forecasts vs actuals (model quality, bias)
 DRIFT_WINDOW_DAYS = 30             # drift window: a week of slow, autocorrelated features is too few samples
 DRIFT_NULL_WINDOWS = 120           # training-period windows used to calibrate the PSI limits
@@ -375,6 +386,16 @@ ATTRIBUTION_NULL_WINDOWS = 30      # ... and the NDCG limits (attribution is cos
 # bands below are only floors, never the limit by themselves.
 PSI_WARN, PSI_ALERT = 0.10, 0.25
 PSI_ALERT_MIN_FEATURES = 3         # drift counts toward retraining only if this many features are in alert
+# Stability indices, both judged against the same monsoon season in the training years:
+#   CSI (characteristic stability index): PSI of each input feature's distribution
+#   PSI (population stability index): PSI of each model's forecast distribution
+# Their limits are calibrated like the drift limits above (99th / 95th percentile over
+# normal training-period windows of that season), with the standard bands as floors.
+SEASON_NULL_WINDOWS = 40           # training-period windows per season used to calibrate CSI / PSI limits
+STABILITY_ALERT_MIN_MODELS = 3     # forecasts of at least this many of the 18 models beyond their PSI limit
+# Upstream ingestion checks. In 12 years no region reported the same PM2.5 value for more
+# than 11 hours in a row (runs of 6+ hours: 47), so 12 identical hours means a stuck feed.
+PM25_STUCK_HOURS = 12
 MISSING_RATE_MAX_INCREASE = 0.05   # absolute increase in a feature's missing rate vs training
 OUT_OF_RANGE_MAX_FRACTION = 0.05   # share of window values outside the training min/max
 FEATURE_MAX_AGE_HOURS = 3          # newest complete gold row older than this = stale pipeline
