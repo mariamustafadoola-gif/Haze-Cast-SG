@@ -93,7 +93,11 @@ def write_ledger(db_path: Path, holdout: pd.DataFrame, gold: pd.DataFrame, manif
         vals = gold[["date", f"now_{target}"]].dropna()
         actual_rows += [(iso(d), target, float(v), "gold_now_" + target, iso(d), iso(d)) for d, v in vals.itertuples(index=False)]
     with db:
-        db.executemany("INSERT OR IGNORE INTO forecasts VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", forecasts)
+        # Columns named explicitly: the live table has gained columns since (fire_carried_hours),
+        # and a positional insert broke the replay when it did.
+        db.executemany("INSERT OR IGNORE INTO forecasts (forecast_id, issued_at, as_of_time, forecast_time, region, "
+                       "horizon_hours, model, model_run_id, manifest_sha256, forecast_pm25, threshold, elevated_flag, "
+                       "feature_age_hours, persistence_pm25) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", forecasts)
         db.executemany("INSERT OR REPLACE INTO actuals VALUES (?,?,?,?,?,?)", actual_rows)
     log.info("backtest ledger: %d forecasts, %d actuals -> %s", len(forecasts), len(actual_rows), db_path)
     return db
