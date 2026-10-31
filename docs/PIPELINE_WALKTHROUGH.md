@@ -509,6 +509,48 @@ Verified in headless Chrome: with live data (rounded values, notice shown for a 
 
 The API container now mounts `serving/` and `src/` like the Airflow containers, so dashboard or API edits apply on restart without rebuilding the image.
 
+### 3.10 This branch (`e2e-pipeline-xgb-multiq`): three quantile models, one chosen per horizon
+
+> Applies to `e2e-pipeline-xgb-multiq`, branched from `e2e-pipeline-fire-fallback` on 31 Oct. Production keeps the flat 0.85 until the team decides.
+
+**Why.** Rechecked on the corrected fire features (`experiments/quantile_recheck_new_fire.py`,
+`reports/model_comparison/quantile_recheck_*.csv`), the flat 0.85 falls behind persistence at
++12 h and +24 h, and the per-cell table from `XGB_Tuned` did not reproduce (9 of 18 values; the
+F2 gap between a cell's best quantile and the next was a median 0.02). Out of time (2024–26):
+
+| Quantile | Haze hours caught | False alarms (non-haze hours) | F2 |
+|---|---|---|---|
+| flat 0.85 (production) | 68% | 1.2% | 0.655 |
+| flat 0.90 | 76% | 1.7% | 0.688 |
+| flat 0.95 | 84% | 2.4% | 0.710 |
+
+**What it does.**
+- **Three models per group:** every region and horizon gets `xgboost_q85`, `xgboost_q90` and `xgboost_q95` (`config.XGB_QUANTILE_BAND`).
+- **One primary per horizon** (`hourly_model._choose_quantile`): it drives `forecast_pm25` and the alert, wherever the quantile family wins the six-candidate comparison.
+  - It is chosen on F2 pooled over the six targets, from the forward folds plus the 2015 and 2019 haze seasons held out in turn (`QUANTILE_SELECTION_HAZE_SEASONS`). The forward folds alone see too little haze, and 2015 is never a forward validation period.
+  - Per horizon, not per region, because the per-region values were noise.
+  - The live choice (the published manifest's `quantile_selection`, otherwise 0.85) is kept unless another wins in ≥ 90% of paired weekly bootstrap resamples, the same stability rule as model selection.
+- **The range is served:** inference stores all three values, sorted so they never cross (`pm25_q85/q90/q95`, nullable ledger columns). The dashboard shows them as a shaded range on the bar and as "range lo–hi" in the text.
+- **The gate handles the range models:** promote, shadow and rollback copy the range models; the integrity check smoke-tests each of them; the like-for-like refit uses each model's recorded quantile.
+
+**Result (31 Oct – 1 Nov 2026, Airflow image, staging `data/models/hourly_staging/multiq_check_20261101`; check only, not promoted):**
+
+| Horizon | Quantile chosen | Beat 0.85 in | Holdout F2: challenger / champion / persistence | Holdout MAE: challenger / champion |
+|---|---|---|---|---|
+| +6 h | 0.90 | 97% of resamples | 0.769 / 0.763 / 0.761 | 9.52 / 8.03 |
+| +12 h | 0.90 | 100% | 0.682 / 0.656 / 0.699 | 10.09 / 8.53 |
+| +24 h | 0.95 | 99.8% | 0.655 / 0.581 / 0.644 | 13.34 / 8.66 |
+
+F2 and MAE are means over the six targets (MAE in µg/m³). Gate (`reports/model_comparison/multiq_gate_check.json`): **passed.**
+- **Integrity:** all 18 primaries and 54 range models load and predict.
+- **Skill:** 18 of 18 groups within 0.10 F2 of persistence; 8 ahead.
+- **No regression, like-for-like:** F2 better than the champion in 13 of 18 groups. The largest gains are central +24 h (+0.19) and east +24 h (+0.11); the largest drop is north +6 h (−0.04). No severe drops, and no MAE above 2× the champion's.
+- **Recent window:** not judged (no haze hours in the last 90 days).
+
+The choice repeated across two full runs (the first stopped after the selection by a logging bug, since fixed). Compared with the flat 0.95 branch, it catches fewer haze hours at +6 h and +12 h (recheck: 85% against 89%, and 77% against 86%) with fewer false alarms there (1.1% against 1.9%, and 1.8% against 2.6% of non-haze hours). Its largest F2 drop against the champion is smaller (−0.04 against −0.06).
+
+**Alert rule.** The model-or-persistence rule at +12/+24 h (switched on 1 Nov 2026, §4.5) applies on top: the flag is raised when the primary forecast or the current reading reaches 56.
+
 ---
 
 ## 4. Orchestration and monitoring
