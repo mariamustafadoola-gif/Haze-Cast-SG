@@ -33,7 +33,7 @@ python -m hazecast.train      # writes data/models/eval_summary.csv + models
 python -m hazecast.score
 ```
 
-**You don't have to do this just to review.** `README.md`'s "Results"
+**You don't have to do this just to review.** `docs/TECHNICAL_GUIDE.md`'s "Results"
 section and the committed `notebooks/pipeline_walkthrough.ipynb` already
 contain real, already-executed output (row counts, eval tables, the
 forecast) from a real run -- read those first.
@@ -57,13 +57,13 @@ it does not exist yet.
 ## 4. Linear regression (1 pax)
 
 - `src/hazecast/train.py` -- the `linreg` candidate (`LinearRegression().fit(...)`) inside `run_season_fold`
-- `README.md` -- "Results" section (MAE / recall / precision tables and the written analysis)
+- `docs/TECHNICAL_GUIDE.md` -- "Results" section (MAE / recall / precision tables and the written analysis)
 - `data/models/eval_summary.csv` (after running training) -- full per-region numbers, not just national
 
 ## 5. XGBoost (1 pax)
 
 - `src/hazecast/train.py` -- `xgboost` (plain MAE) and `xgboost_q85` (quantile, the shipped model) candidates, plus `train_final_models`
-- `README.md` -- "Why a quantile model, and how `XGB_QUANTILE_ALPHA=0.85` was chosen" section
+- `docs/TECHNICAL_GUIDE.md` -- "Why a quantile model, and how `XGB_QUANTILE_ALPHA=0.85` was chosen" section
 - `data/models/eval_summary.csv` and `data/models/xgb_*.json` (saved per-region models, after running training)
 
 ## 6. Reviewing each other's work on GitHub
@@ -78,4 +78,4 @@ it does not exist yet.
 
 - Nothing under `data/` (except the `.gitkeep` placeholders) is in GitHub -- it regenerates locally when each of you runs the pipeline after downloading the 3 sources yourselves.
 - `mlflow.db` and `mlruns/` (experiment tracking) are also local-only and gitignored -- MLflow's UI (`localhost:5000` via `docker compose up`) only shows runs from whoever generated them locally.
-- The numbers in `README.md` and the committed notebook are real and already reproducible without anyone re-running anything -- start there before deciding whether you need to regenerate data yourself.
+- The numbers in `docs/TECHNICAL_GUIDE.md` and the committed notebook are real and already reproducible without anyone re-running anything -- start there before deciding whether you need to regenerate data yourself.

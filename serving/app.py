@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from hazecast.config import GOLD_DIR, MODELS_DIR, MONITORING_DIR, PM25_ELEVATED_THRESHOLD, REPO_ROOT
+from hazecast import context as ctx
 
 app = FastAPI(title="HazeCast SG", version="0.2.0")
 
@@ -32,6 +33,8 @@ FORECAST_PATH = GOLD_DIR / "latest_forecast.json"
 HOURLY_FORECAST_PATH = GOLD_DIR / "latest_hourly_forecast.json"
 MONITOR_PATH = MONITORING_DIR / "latest_model_monitor.json"
 DASHBOARD_DIR = REPO_ROOT / "reports" / "monitoring"
+GOLD_HOURLY_PATH = ctx.GOLD_HOURLY_PATH
+METRICS_PATH = ctx.METRICS_PATH
 
 
 def _read_json(path: Path, missing: str):
@@ -129,6 +132,18 @@ def get_config():
     """Expose the decision threshold so the dashboard/alerting stays in
     sync with what the model was evaluated against."""
     return {"elevated_threshold_ug_m3": PM25_ELEVATED_THRESHOLD}
+
+
+@app.get("/context")
+def get_context():
+    """What the page shows around the forecast: latest readings, test-period
+    accuracy and the monitoring decision."""
+    if not GOLD_HOURLY_PATH.exists():
+        raise HTTPException(status_code=503, detail="gold hourly table not built yet; run the pipeline")
+    try:
+        return ctx.build_context(GOLD_HOURLY_PATH, METRICS_PATH, MONITOR_PATH)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e))
 
 
 # Dashboard: static page calling the endpoints above on the same origin (no CORS

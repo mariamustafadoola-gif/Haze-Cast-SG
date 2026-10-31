@@ -76,5 +76,26 @@ def test_source_status_names_each_upstream_source(client, monkeypatch):
 def test_dashboard_greys_out_target_times_that_have_passed():
     html = STATIC.read_text(encoding="utf-8")
     assert "function isPassed(row)" in html and "dataMode === MODE_LIVE" in html   # never applied to demo data
-    assert html.count("isPassed(") >= 5      # mini cells, region band, national figure, detail bar, notice
-    assert ".c-mini.passed" in html and "waiting for " in html
+    assert html.count("isPassed(") >= 3      # forecast values per tab, the notice, and its definition
+    assert ".slot.passed" in html and "waiting for " in html
+
+
+def test_context_gives_latest_readings_and_accuracy(tmp_path, monkeypatch):
+    import pandas as pd
+    hours = pd.date_range("2026-10-16 20:00", periods=4, freq="h")
+    gold = pd.DataFrame({"date": hours, **{f"now_{r}": 60.0 for r in ("north", "south", "east", "west", "central")},
+                         "now_national": 60.0})
+    gold.loc[3, "now_national"] = None   # newest hour not complete yet, so the one before is used
+    path = tmp_path / "hourly_features.parquet"
+    gold.to_parquet(path)
+    monkeypatch.setattr(api, "GOLD_HOURLY_PATH", path)
+    monkeypatch.setattr(api, "MONITOR_PATH", tmp_path / "none.json")
+    c = TestClient(api.app).get("/context").json()
+    assert c["now"]["west"] == 60.0 and c["as_of_time"].startswith("2026-10-16T22:00")
+    assert set(c) == {"as_of_time", "now", "accuracy", "monitoring"}
+    assert c["monitoring"] is None
+
+
+def test_missing_gold_makes_context_503(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "GOLD_HOURLY_PATH", tmp_path / "nothing.parquet")
+    assert TestClient(api.app).get("/context").status_code == 503
