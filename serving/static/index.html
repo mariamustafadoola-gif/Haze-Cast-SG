@@ -105,6 +105,11 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     var(--high) 60%, var(--high) 100%);}
 .band-bar-marker{position:absolute; top:50%; width:14px; height:14px; border-radius:50%;
   background:#fff; border:3px solid var(--ink); transform:translate(-50%,-50%); box-shadow:0 1px 4px rgba(53,43,34,0.35);}
+/* Forecast range: from the 85th- to the 95th-percentile models, behind the marker. */
+.band-bar-range{position:absolute; top:-4px; height:18px; border-radius:999px; min-width:4px;
+  background:rgba(243,234,221,0.30); border:1.5px solid var(--ink); transform:translateX(0);}
+.band-bar-range[hidden]{display:none;}
+.region-range{font-size:12px; font-weight:700; color:var(--ink-faint);}
 .band-bar-scale{position:relative; height:13px; font-size:9.5px; font-weight:700; color:var(--ink-faint); margin-top:5px;}
 .band-bar-scale span{position:absolute; transform:translateX(-50%);}
 .band-bar-scale span:first-child{transform:translateX(0);}
@@ -180,8 +185,10 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
   <div class="bar-label">
     <span class="region-name" id="detailRegion"></span>
     <span class="region-val" id="detailVal"></span>
+    <span class="region-range" id="detailRange"></span>
   </div>
-  <div class="band-bar"><div class="band-bar-marker" id="bandBarMarker"></div></div>
+  <div class="band-bar"><div class="band-bar-range" id="bandBarRange" hidden
+    title="Range of the three quantile forecasts (85th to 95th percentile)"></div><div class="band-bar-marker" id="bandBarMarker"></div></div>
   <div class="band-bar-scale">
     <span style="left:0%;">0</span>
     <span style="left:22%;">56</span>
@@ -276,6 +283,17 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     if (v > HIGH_THRESHOLD) return { key: "high", label: "High", note: "stay indoors" };
     if (v >= threshold) return { key: "amber", label: "Elevated", note: "mask up" };
     return { key: "good", label: "Normal", note: "go outside" };
+  }
+
+  // Forecast range from the three quantile models (85th/90th/95th percentile); null for
+  // forecasts made before the range existed, or in mock mode.
+  function rangeOf(row) {
+    if (!row || row.pm25_q85 == null || row.pm25_q95 == null) return null;
+    return [Number(row.pm25_q85), Number(row.pm25_q95)];
+  }
+
+  function fmtRange(r) {
+    return r ? "range " + fmtPm(r[0]) + "–" + fmtPm(r[1]) : "";
   }
 
   // Forecasts are stored unrounded (they feed the accuracy metrics); round only for display.
@@ -472,8 +490,10 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
         if (!row) return '<div class="c-mini"><div class="lbl">' + h + 'h</div><div class="val">—</div></div>';
         const mb = band(row.forecast_pm25);
         const past = isPassed(row);
+        const tip = past ? "Target time has passed; waiting for a new forecast"
+                         : (rangeOf(row) ? fmtRange(rangeOf(row)) + " µg/m³" : "");
         return '<div class="c-mini' + (past ? ' passed' : '') + '" style="background:var(--' + mb.key + '-bg)"' +
-          (past ? ' title="Target time has passed; waiting for a new forecast"' : '') + '><div class="lbl">' + h + 'h</div>' +
+          (tip ? ' title="' + tip + '"' : '') + '><div class="lbl">' + h + 'h</div>' +
           '<div class="val" style="color:var(--' + mb.key + ')">' + fmtPm(row.forecast_pm25) + '</div></div>';
       };
       const div = document.createElement("div");
@@ -510,10 +530,20 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     document.getElementById("detailVal").style.color = "var(--ink-muted)";
 
     const BAND_SCALE_MAX = 250; // matches the "250+" scale label; values beyond this pin to the right edge
-    const pct = Math.max(0, Math.min(100, (main.forecast_pm25 / BAND_SCALE_MAX) * 100));
+    const toPct = v => Math.max(0, Math.min(100, (v / BAND_SCALE_MAX) * 100));
+    const pct = toPct(main.forecast_pm25);
     const marker = document.getElementById("bandBarMarker");
     marker.style.left = pct + "%";
     marker.style.borderColor = "var(--" + b.key + ")";
+
+    const range = isPassed(main) ? null : rangeOf(main);
+    const rangeEl = document.getElementById("bandBarRange");
+    document.getElementById("detailRange").textContent = range ? "· " + fmtRange(range) : "";
+    rangeEl.hidden = !range;
+    if (range) {
+      rangeEl.style.left = toPct(range[0]) + "%";
+      rangeEl.style.width = (toPct(range[1]) - toPct(range[0])) + "%";
+    }
   }
 
   // Freshness isn't shown as a persistent label any more -- it's only ever

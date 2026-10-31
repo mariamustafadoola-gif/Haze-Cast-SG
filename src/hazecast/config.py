@@ -220,6 +220,21 @@ XGB_PARAMS = dict(
 # of more false alarms; 0.70-0.95 were swept, 0.85 was the best balance.
 XGB_QUANTILE_ALPHA = 0.85
 
+# Hourly quantile range (e2e-pipeline-xgb-multiq). Every region and horizon gets three quantile
+# models. All three are served (the range on the dashboard and the pm25_q* ledger columns); one
+# per horizon is the primary forecast that drives the alert. The primary is chosen by
+# hourly_model._choose_quantile on F2 pooled over the six targets, from the forward folds plus
+# the haze seasons below. It is chosen per horizon, not per region: per-region values did not
+# reproduce on recheck (docs/PIPELINE_WALKTHROUGH.md section 3.11). The live choice is kept
+# unless another wins in SELECTION_SWITCH_CONFIDENCE of resamples. Changing these values also
+# needs matching pm25_q* ledger columns (pipeline_store.BAND_COLUMNS).
+XGB_QUANTILE_BAND = (0.85, 0.90, 0.95)
+# Extra validation folds for the quantile choice only: each season is held out in turn and the
+# model trained on the remaining pre-holdout rows (the method used for XGB_Tuned). The forward
+# folds see too little haze to choose a quantile on their own: 2015 falls in the first training
+# block and is never validated on.
+QUANTILE_SELECTION_HAZE_SEASONS = (2015, 2019)
+
 
 # ---------------------------------------------------------------------------
 # Selected features (data team, 2026-10). The gold tables still contain all

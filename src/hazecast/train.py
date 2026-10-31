@@ -96,6 +96,19 @@ def save_model(model, path):
         pickle.dump(model, fh, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def quantile_name(alpha):
+    """0.95 -> "xgboost_q95"."""
+    return f"xgboost_q{round(alpha * 100)}"
+
+
+def quantile_alpha(name):
+    """"xgboost_q95" -> 0.95; None for a model that is not a quantile model. xgboost_q85 keeps the
+    configured XGB_QUANTILE_ALPHA, as before the range models were added."""
+    if not name or not name.startswith("xgboost_q") or not name[9:].isdigit():
+        return None
+    return XGB_QUANTILE_ALPHA if name == "xgboost_q85" else int(name[9:]) / 100
+
+
 def _make_model(name):
     if name == "ridge":
         return make_pipeline(StandardScaler(), Ridge(alpha=RIDGE_ALPHA))
@@ -112,9 +125,9 @@ def _make_model(name):
         return RandomForestRegressor(**RANDOM_FOREST_PARAMS)
     if name == "xgboost":
         return XGBRegressor(**{**XGB_PARAMS, "objective": "reg:absoluteerror"})
-    if name == "xgboost_q85":
+    if quantile_alpha(name) is not None:
         return XGBRegressor(**{**XGB_PARAMS, "objective": "reg:quantileerror",
-                              "quantile_alpha": XGB_QUANTILE_ALPHA})
+                              "quantile_alpha": quantile_alpha(name)})
     if name == "persistence":
         return None
     raise ValueError(f"Unknown model: {name}")
@@ -224,7 +237,7 @@ def _json_safe(value):
 def _log_selected_model(model, candidate):
     """Use native boosting formats and support MLflow 2.x/3.x naming."""
     import inspect
-    if candidate in ("xgboost", "xgboost_q85"):
+    if candidate == "xgboost" or quantile_alpha(candidate) is not None:   # incl. the range models
         import mlflow.xgboost
         logger = mlflow.xgboost.log_model
         saved_model = model
