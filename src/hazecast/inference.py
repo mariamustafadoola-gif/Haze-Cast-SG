@@ -11,7 +11,7 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from hazecast.config import GOLD_DIR, MODELS_DIR, DATA_DIR
+from hazecast.config import GOLD_DIR, MODELS_DIR, DATA_DIR, ALERT_PERSISTENCE_HORIZONS
 from hazecast.pipeline_store import (
     TARGETS, HORIZONS, BAND_COLUMNS, connect, timestamp, iso, finite, atomic_json,
 )
@@ -105,17 +105,24 @@ def predict_final(gold_path, models_dir, *, max_feature_age_hours=2, now=None):
             if not math.isfinite(prediction):
                 raise ValueError("Nonfinite prediction")
             prediction = max(0.0, prediction)
+            persistence = float(row[f"now_{target}"].iloc[0])
             key = f"{iso(origin)}|{target}|{horizon}"
             records.append(dict(forecast_id=hashlib.sha256(key.encode()).hexdigest(),
                 issued_at=iso(now), as_of_time=iso(origin), forecast_time=iso(forecast_time),
                 region=target, horizon_hours=horizon, model=entry["model"],
                 model_run_id=entry.get("run_id"), manifest_sha256=digest,
                 forecast_pm25=prediction, threshold=threshold,
-                elevated_flag=int(prediction >= threshold), feature_age_hours=age,
-                persistence_pm25=float(row[f"now_{target}"].iloc[0]),
+                elevated_flag=int(elevated(prediction, persistence, horizon, threshold)),
+                feature_age_hours=age, persistence_pm25=persistence,
                 fire_carried_hours=fire_carried,
                 **{col: band.get(name) for name, col in BAND_COLUMNS.items()}))
     return records
+
+
+def elevated(prediction, persistence, horizon, threshold):
+    """The public flag: the model's forecast reaches the threshold or, at the
+    ALERT_PERSISTENCE_HORIZONS, the current reading already does."""
+    return prediction >= threshold or (horizon in ALERT_PERSISTENCE_HORIZONS and persistence >= threshold)
 
 
 def _band(entry, predict):

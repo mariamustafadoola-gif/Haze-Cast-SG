@@ -296,6 +296,15 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     return r ? "range " + fmtPm(r[0]) + "–" + fmtPm(r[1]) : "";
   }
 
+  // Band for a forecast row. At +12/+24 h the pipeline also flags a row when PM2.5 is already
+  // elevated now (model-or-persistence rule), so a flagged row below 56 still shows as Elevated.
+  function bandOf(row) {
+    const b = band(row.forecast_pm25);
+    if (b.key === "good" && (row.elevated_flag === true || row.elevated_flag === 1))
+      return { key: "amber", label: "Elevated", note: "hazy now; may persist" };
+    return b;
+  }
+
   // Forecasts are stored unrounded (they feed the accuracy metrics); round only for display.
   function fmtPm(v) {
     return (v == null || isNaN(v)) ? "—" : Number(v).toFixed(1);
@@ -465,7 +474,7 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     // national figure, above the map
     const nat6 = currentRow(forecastData.filter(r => r.region === "national"));
     if (nat6) {
-      const nb = band(nat6.forecast_pm25);
+      const nb = bandOf(nat6);
       const natEl = document.getElementById("nationalFigure");
       natEl.textContent = fmtPm(nat6.forecast_pm25) + " µg/m³ · " + rowLabel(nat6, nb);
       natEl.style.color = "var(--" + nb.key + ")";
@@ -479,7 +488,7 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
       const rows = forecastData.filter(r => r.region === region);
       const main = currentRow(rows);
       if (!main) return;
-      const b = band(main.forecast_pm25);
+      const b = bandOf(main);
       const h6 = rows.find(r => r.horizon_hours === 6);
       const h12 = rows.find(r => r.horizon_hours === 12);
       const h24 = rows.find(r => r.horizon_hours === 24);
@@ -488,10 +497,11 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
       // so the row reads as a quick 6/12/24h severity trend at a glance.
       const mini = (row, h) => {
         if (!row) return '<div class="c-mini"><div class="lbl">' + h + 'h</div><div class="val">—</div></div>';
-        const mb = band(row.forecast_pm25);
+        const mb = bandOf(row);
         const past = isPassed(row);
         const tip = past ? "Target time has passed; waiting for a new forecast"
-                         : (rangeOf(row) ? fmtRange(rangeOf(row)) + " µg/m³" : "");
+                         : (mb.note === "hazy now; may persist" ? "Elevated now: flagged in case the haze persists"
+                         : (rangeOf(row) ? fmtRange(rangeOf(row)) + " µg/m³" : ""));
         return '<div class="c-mini' + (past ? ' passed' : '') + '" style="background:var(--' + mb.key + '-bg)"' +
           (tip ? ' title="' + tip + '"' : '') + '><div class="lbl">' + h + 'h</div>' +
           '<div class="val" style="color:var(--' + mb.key + ')">' + fmtPm(row.forecast_pm25) + '</div></div>';
@@ -522,7 +532,7 @@ body{margin:0;background:var(--bg);font-family:'Inter',sans-serif;color:var(--in
     const rows = forecastData.filter(r => r.region === selectedRegion);
     const main = currentRow(rows) || rows[0];
     if (!main) return;
-    const b = band(main.forecast_pm25);
+    const b = bandOf(main);
     document.getElementById("detailRegion").textContent = selectedRegion;
     document.getElementById("detailRegion").style.color = "var(--" + b.key + ")";
     document.getElementById("detailVal").textContent = fmtPm(main.forecast_pm25) + " µg/m³ · " +
