@@ -695,16 +695,19 @@ the episode (`experiments/monitoring_evidence.py`).
 - **Yes, for calibration:** false alarms fell from 19 % to 15 % at +6 h and from **36 % to 12 % at +24 h**, MAE dropped (29.8 → 24.9 at +24 h), and +6 h recall held (0.84 → 0.83).
 - **No, for +24 h recall:** 0.53 after retraining vs **0.69 for persistence**. This isn't staleness. Persistence is very hard to beat a day ahead once a long episode is underway.
 
-**Recommended additional intervention (needs team sign-off):** for +12 h
+**Additional intervention (approved, switched on 1 Nov 2026):** for +12 h
 and +24 h, raise the `elevated_flag` when **either** the model or
 persistence crosses 56. On the whole holdout this lifts +24 h recall
 from **0.56 to 0.74** (+12 h: 0.70 → 0.77), while false alarms move only
 from 1.7 % to 2.0 % of non-haze hours. Inside a haze episode the cost is
 higher (non-haze-hour false alarms 36 % → 45 %, mostly hours just below 56),
 which is acceptable for the stated user, for whom a false alarm means a
-precaution. It is not switched on in code, because it changes what the
-public-facing flag means. That is a product decision for the team (see
-`MODEL_GOVERNANCE.md` §5).
+precaution. Because it changes what the public flag means, it waited for
+the team's sign-off (`MODEL_GOVERNANCE.md` §5). It is implemented in
+`inference.elevated` (`config.ALERT_PERSISTENCE_HORIZONS = (12, 24)`); the
+monitors keep scoring the model's own `forecast_pm25`, and the dashboard
+shows a flagged forecast as Elevated even below 56, with a note that PM2.5
+is elevated now.
 
 ### 4.6 Reproducing the evidence
 

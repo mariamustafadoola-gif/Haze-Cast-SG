@@ -58,6 +58,12 @@ WEATHER_POINTS = {
 # own data profiling:
 #   Normal: 0-55, Elevated: 56-150, High: 151-250, Very High: >250
 PM25_ELEVATED_THRESHOLD = 56.0
+# Alert rule (approved 1 Nov 2026): at these horizons a forecast is also flagged elevated when
+# the current reading (persistence) is at or above the threshold, whatever the model says. Once
+# an episode is under way "same as now" is hard to beat a day ahead; on the 2024-26 holdout this
+# lifts +24 h recall 0.56 -> 0.74 (+12 h 0.70 -> 0.77) for false alarms 1.7% -> 2.0% of calm
+# hours. The monitors keep scoring the model's own forecast_pm25, not this flag.
+ALERT_PERSISTENCE_HORIZONS = (12, 24)
 
 # Silver gap filling (data team, 2026-10). A gap of up to this many hours
 # in an hourly series is filled by straight-line interpolation between the
