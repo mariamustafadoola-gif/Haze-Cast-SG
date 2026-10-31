@@ -98,12 +98,15 @@
 
   .map-title { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
   .map-title h2 { white-space: nowrap; }
+  #mapWhen .unit { white-space: nowrap; }
   .loc-btn {
     display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 999px;
     background: #D3F0F2; color: var(--accent); padding: 6px 11px; font-size: 13px; font-weight: 700; white-space: nowrap;
   }
   .loc-btn .narrow { display: none; }
   @media (max-width: 400px) {
+    #mapWhen .unit { display: block; }
+    #mapWhen .sep { display: none; }
     .loc-btn .wide { display: none; }
     .loc-btn .narrow { display: inline; }
     .loc-btn { padding: 6px 10px; }
@@ -121,9 +124,9 @@
     border-radius: 12px; padding: 7px 9px; display: flex; flex-direction: column; gap: 4px;
     box-shadow: 0 1px 2px rgba(11,37,69,0.10); font-size: 11px;
   }
+  .legend .legend-title { font-weight: 700; color: var(--muted); font-size: 10px; letter-spacing: 0.02em; }
   .legend div { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
   .sw { width: 11px; height: 11px; border-radius: 3px; flex-shrink: 0; }
-  .map-foot { font-size: 12px; color: var(--muted); margin: 8px 2px 0; }
 
   /* Summary */
   .summary { display: flex; gap: 12px; align-items: center; }
@@ -153,6 +156,7 @@
   .ring { flex-shrink: 0; }
   .sure-text { font-size: 14px; }
   .sure-text p { margin: 0 0 6px; }
+  .check[hidden] { display: none; }
   .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 14px; }
 
   .banner { border-radius: 14px; padding: 9px 12px; font-size: 13px; background: var(--yellow-soft); color: #6B4E00; border: 2px solid #E8C770; }
@@ -223,7 +227,6 @@
           </svg>
           <div class="legend" id="legend"></div>
         </div>
-        <p class="map-foot">PM2.5 in µg/m³. Tap a region to make it yours.</p>
       </section>
 
       <section class="card summary" aria-live="polite">
@@ -263,7 +266,7 @@
       </div>
       <button class="refresh" id="refreshBtn" type="button">Refresh</button>
     </div>
-    <span>HazeCast SG · PM2.5 from NEA, fires from NASA FIRMS, weather from Open-Meteo · Map: geoBoundaries (CC BY 4.0)</span>
+    <span>Data: NEA, NASA FIRMS, Open-Meteo · Map: geoBoundaries (CC BY 4.0)</span>
   </footer>
 </main>
 
@@ -473,8 +476,7 @@
     let msg = "";
     if (dataMode === MODE_DEMO) {
       const when = fmtDate(MOCK_CONTEXT.as_of_time);
-      msg = (demoReason === "offline" ? "The live service isn't connected here, so this is " : "This is ")
-        + "saved demo data from " + when + ", not today's haze.";
+      msg = "Demo: saved data from " + when + ".";
     } else if ((forecastAgeHours != null && forecastAgeHours > STALE_HOURS) || fireCarriedHours > 0) {
       const parts = [];
       if (forecastAgeHours != null && forecastAgeHours > STALE_HOURS) {
@@ -503,7 +505,7 @@
       : vals.national.passed ? "Was for " + fmtWhen(vals.national.time, true) + ", now passed"
       : (vals.national.time ? "Around " + fmtWhen(vals.national.time, true) : "");
     document.getElementById("mapTitle").textContent = title;
-    document.getElementById("mapWhen").textContent = when;
+    document.getElementById("mapWhen").innerHTML = when + '<span class="unit"><span class="sep">' + (when ? " · " : "") + '</span>PM2.5 µg/m³</span>';
 
     const g = document.getElementById("regions"), lab = document.getElementById("labels");
     g.replaceChildren(); lab.replaceChildren();
@@ -622,8 +624,7 @@
     };
     if (tab === "now") {
       drawRing(1, "Real");
-      text.innerHTML = "<p><b>These are measured readings</b>, not a forecast. They come from NEA's monitoring stations"
-        + (context && context.as_of_time ? ", last updated " + fmtDate(context.as_of_time) : "") + ".</p>";
+      text.innerHTML = "<p><b>Measured readings</b> from NEA's stations, not a forecast.</p>";
     } else {
       const h = acc.horizons[tab] || {};
       const caught = h.caught_share != null ? Math.round(h.caught_share * 10) : null;
@@ -631,18 +632,18 @@
       const name = tab === "24" ? "tomorrow's" : "the " + tab + "-hour";
       const period = acc.test_period ? ` (${fmtMonth(acc.test_period[0])} to ${fmtMonth(acc.test_period[1])})` : "";
       drawRing(h.caught_share, caught != null ? caught + "/10" : "–");
-      text.innerHTML = `<p>When we tested ${name} forecast on past haze${period}, it <b>warned about ${caught} in every 10 unhealthy hours</b>.`
-        + (right != null ? ` When it did warn, it was right about ${right} times in 10.` : "") + `</p>`
-        + `<p class="sub">We lean to the safe side: the number shown is a cautious estimate, so the real level is usually at or below it.</p>`;
+      text.innerHTML = `<p>In testing${period}, ${name} forecast <b>caught ${caught} in 10 unhealthy hours</b>`
+        + (right != null ? ` and was right ${right} in 10 times it warned.` : ".") + `</p>`;
     }
     const m = context && context.monitoring;
     const check = document.getElementById("check");
-    let colour = "#8FA3B5", msg = "Model health check hasn't run yet" + (dataMode === MODE_DEMO ? " in this demo." : ".");
+    check.hidden = dataMode === MODE_DEMO;   // the demo snapshot has no health check to report
+    let colour = "#8FA3B5", msg = "Model check: not run yet";
     if (m && m.action) {
-      if (m.action === "none") { colour = C.green; msg = "Model health check: all good"; }
-      else if (m.action === "investigate") { colour = C.yellow; msg = "Model health check: something looks off, the team is checking"; }
-      else if (m.action === "retrain") { colour = "#E07B24"; msg = "Model health check: the model is due a refresh"; }
-      else { colour = C.red; msg = "Model health check: input data has a problem"; }
+      if (m.action === "none") { colour = C.green; msg = "Model check: all good"; }
+      else if (m.action === "investigate") { colour = C.yellow; msg = "Model check: under review"; }
+      else if (m.action === "retrain") { colour = "#E07B24"; msg = "Model check: retraining"; }
+      else { colour = C.red; msg = "Model check: data issue"; }
       if (m.generated_at) msg += " (" + fmtDate(m.generated_at) + ")";
     }
     check.innerHTML = `<span class="status-dot" style="background:${colour}"></span><span>${msg}</span>`;
