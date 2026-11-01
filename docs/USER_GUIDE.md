@@ -99,7 +99,7 @@ The map colours are **advice**, so they change when you change **Who's going out
 | **Red** | 56 and above | **Stay indoors** if you can |
 
 > [!NOTE]
-> The stricter rule is **our own cautious choice**, not an official NEA one. For official advice, check [haze.gov.sg](https://www.haze.gov.sg).
+> **Where these numbers come from.** The general bands are NEA's official [1-hour PM2.5 bands](https://haze.gov.sg/resources/1-hr-pm2.5-readings). The stricter yellow band (36 to 55) matches the US EPA's **"Unhealthy for Sensitive Groups"** PM2.5 range (35.5 to 55.4 µg/m³), and red starts at 56, where the EPA's "Unhealthy" range and NEA's "Elevated" band both begin ([EPA, 2024](https://www.epa.gov/system/files/documents/2024-02/pm-naaqs-air-quality-index-fact-sheet.pdf)). The EPA ranges are meant for 24-hour averages, so applying them to hourly values is deliberately cautious. This is guidance, not an official advisory: for official advice, check [haze.gov.sg](https://www.haze.gov.sg).
 
 **Summary headlines.** The headline in the summary card reflects all five regions:
 

@@ -60,10 +60,21 @@ Official readings describe the air **as it is now**. Outdoor operations teams (e
 | **Late-data handling** | If a source is delayed, forecasts whose target time has passed are greyed out and the delayed source is named |
 | **Offline demo** | A real snapshot (16 Oct 2026, 11 pm) is embedded, so the app works with no server or internet |
 
-**Advice bands** (NEA one-hour PM2.5 bands):
+**Advice bands.** Each colour is a recommended action. The thresholds come from published standards, not from the model:
 
-| Colour | PM2.5 (µg/m³) | General public | Children, elderly and asthmatic patients |
-|---|---|---|---|
+| Colour | General public | Children, elderly and asthmatic patients |
+|---|---|---|
+| **Green** | 0 to 55 µg/m³: Go out | 0 to 35 µg/m³: Go out |
+| **Yellow** | 56 to 150 µg/m³: Wear an N95 mask outdoors | 36 to 55 µg/m³: Short trips only, with a mask |
+| **Red** | 151 µg/m³ and above: Stay indoors | 56 µg/m³ and above: Stay indoors |
+
+- **General public:** NEA's official [1-hour PM2.5 bands](https://haze.gov.sg/resources/1-hr-pm2.5-readings): Normal (0 to 55), Elevated (56 to 150), High (151 to 250) and Very High (251 and above). Green is Normal, yellow is Elevated, and red covers High and Very High.
+- **Children, elderly and asthmatic patients:** one step stricter. The yellow band matches the US EPA's **"Unhealthy for Sensitive Groups"** PM2.5 range (35.5 to 55.4 µg/m³), and red starts where the EPA's "Unhealthy" range begins (55.5), which is also where NEA's "Elevated" band begins ([EPA AQI fact sheet, 2024](https://www.epa.gov/system/files/documents/2024-02/pm-naaqs-air-quality-index-fact-sheet.pdf)).
+
+> [!NOTE]
+> The EPA ranges are defined for 24-hour averages; HazeCast applies them to hourly readings and forecasts, which makes the advice more cautious, the safe direction for vulnerable groups. NEA's own advice for vulnerable groups is based on the 24-hour PSI, so this mode is guidance, not an official advisory.
+
+---|---|---|---|
 | **Green** | 0 to 55 | Go out | Go out (0 to 35 only) |
 | **Yellow** | 56 to 150 | Wear an N95 mask outdoors | Short trips only, with a mask (36 to 55) |
 | **Red** | 151 and above | Stay indoors | Stay indoors (from 56) |
@@ -307,7 +318,7 @@ A challenger is promoted only if it passes **integrity checks**, detects elevate
 - **Wind is measured at Singapore only.** Smoke transport along the full path from the fire regions is not modelled.
 - **Hosting.** The system currently runs locally with Docker. A cloud deployment would make the live app publicly available.
 - **Alerts.** Push or email notifications when a region is forecast to turn red would increase practical value.
-- **Sensitive-group thresholds** are a conservative project choice and would benefit from review against public health guidance.
+- **Sensitive-group thresholds** follow the US EPA's 24-hour "Unhealthy for Sensitive Groups" range applied to hourly values. Review with local public health guidance would strengthen them.
 
 ---
 
