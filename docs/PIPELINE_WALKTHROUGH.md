@@ -68,7 +68,7 @@ task run without rebuilding. Rebuild only when the requirements change.
 ### 1.2 First-time setup
 
 ```bash
-git clone <repo> && cd hazecast-sg && git checkout e2e-pipeline
+git clone <repo> && cd hazecast-sg && git checkout e2e-pipeline-xgb-multiq   # the main line since 1 Nov
 git lfs pull                      # the committed raw-data seed (optional: the backfill DAG can fetch it all)
 cp .env.example .env
 ```
@@ -511,7 +511,7 @@ The API container now mounts `serving/` and `src/` like the Airflow containers, 
 
 ### 3.10 Three quantile models, one chosen per horizon (from `e2e-pipeline-xgb-multiq`; live since 1 Nov)
 
-> Built on `e2e-pipeline-xgb-multiq` (branched 31 Oct), chosen by the team on 1 Nov, merged into `e2e-pipeline-fire-fallback` and promoted the same day. Before that, production used a flat 0.85.
+> Built on `e2e-pipeline-xgb-multiq` (branched 31 Oct), chosen by the team on 1 Nov, merged into `e2e-pipeline-fire-fallback` and promoted the same day. Before that, production used a flat 0.85. Since then the team works on `e2e-pipeline-xgb-multiq` itself (the main line); `e2e-pipeline-fire-fallback` is frozen.
 
 **Why.** Rechecked on the corrected fire features (`experiments/quantile_recheck_new_fire.py`,
 `reports/model_comparison/quantile_recheck_*.csv`), the flat 0.85 falls behind persistence at
@@ -570,8 +570,19 @@ rate at +6/+12 h.
 
 **Monitoring dashboard: forecast against actual for every region and horizon.** The chart
 (`hazecast.dashboard.forecast_vs_actual`) has a menu for all 18 region × horizon combinations and
-shows the latest 90 days: actual, forecast, persistence, and the 0.85–0.95 range shaded where it
-was served. Hours with no forecast are gaps, not straight lines. The holdout replay
+zoom buttons (2 weeks / 3 months / all). It draws two layers, kept visibly apart:
+- **Replay (dotted, faded):** the latest year of the holdout replay (`data/monitoring/backtest.sqlite`,
+  rebuilt by every retrain), from a model trained only on data before the holdout. It gives the
+  continuous history, including the 2026 haze. Display only: it is never written to the live
+  ledger, so the monitors, the recent-window gate check and the early-life check judge live
+  forecasts alone. The production model is not used to fill gaps, because it was trained on those hours.
+- **Live (solid, a dot per hour):** forecasts actually issued, with persistence and the 0.85–0.95
+  range. Hours the pipeline did not forecast (stack down, stale data) are gaps; the dots keep
+  isolated hours visible. A dashed line marks the go-live date.
+
+Added 1 Nov after the live chart looked disjointed: from 26 Oct to 1 Nov only 40 of ~170 hours had
+a forecast (the laptop was off or asleep for most of the rest; 22 runs were skipped by the
+freshness gate). Continuous live history needs an always-on host. The holdout replay
 (`monitor_backtest`) now refits the range models too and applies the alert rule to its flags, so
 the replay dashboard shows the range over the 2026 haze. Replay of this branch's models
 (118 weekly windows): 106 no action, 2 investigate, 10 retrain, all retrains in the 2026 haze.
