@@ -5,7 +5,8 @@ monitor_runs tables hazecast.model_monitor writes) and plots every monitor
 over time:
 
   1. governance decision per monitoring window
-  2. forecast vs actual (national, +6 h)
+  2. forecast vs actual for any region and horizon (last FORECAST_CHART_DAYS days), with
+     persistence and, where served, the 0.85-0.95 quantile range
   3. model quality: MAE and skill vs persistence per horizon, F2 on elevated hours
   4. stability: CSI of each feature and PSI of each model's forecasts against the same
      monsoon season in the training years, as a share of their calibrated limits, and the
@@ -44,6 +45,8 @@ REGION_COLOR = dict(zip(SG_REGIONS, SERIES))                   # fixed per entit
 STATUS = {"none": ("#0ca30c", "No action"), "investigate": ("#fab219", "Investigate"),
           "retrain": ("#ec835a", "Retrain"), "fix_data": ("#d03b3b", "Fix data")}
 INK, INK_2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e6e5e1", "#fcfcfb"
+FORECAST_CHART_DAYS = 90       # the forecast-vs-actual chart shows the latest 90 days of the ledger
+BAND_LOW, BAND_HIGH = "pm25_q85", "pm25_q95"
 SEQUENTIAL = ["#fcfcfb", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
 
 
@@ -53,11 +56,15 @@ def _read(db_path: Path):
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         metrics = pd.read_sql("SELECT * FROM monitor_metrics", db) if "monitor_metrics" in tables else pd.DataFrame()
         runs = pd.read_sql("SELECT * FROM monitor_runs", db) if "monitor_runs" in tables else pd.DataFrame()
-        series = pd.read_sql("""
-            SELECT f.forecast_time, f.forecast_pm25, a.actual_pm25 FROM forecasts f
-            LEFT JOIN actuals a ON f.forecast_time = a.observation_time AND f.region = a.region
-            WHERE f.region = 'national' AND f.horizon_hours = 6 ORDER BY f.forecast_time""", db) \
-            if "forecasts" in tables else pd.DataFrame()
+        series = pd.DataFrame()
+        if "forecasts" in tables:
+            have = {r[1] for r in db.execute("PRAGMA table_info(forecasts)")}
+            band = "".join(f", f.{c}" for c in (BAND_LOW, BAND_HIGH) if c in have)   # ledgers before the range lack them
+            series = pd.read_sql(f"""
+                SELECT f.forecast_time, f.region, f.horizon_hours, f.forecast_pm25, f.persistence_pm25,
+                       f.elevated_flag{band}, a.actual_pm25 FROM forecasts f
+                LEFT JOIN actuals a ON f.forecast_time = a.observation_time AND f.region = a.region
+                ORDER BY f.forecast_time""", db)
     finally:
         db.close()
     for frame, col in ((metrics, "window_end"), (runs, "window_end"), (series, "forecast_time")):
@@ -107,6 +114,57 @@ def _season_bands(fig, dates: pd.Series) -> None:
                                font=dict(size=10, color=INK_2))
 
 
+def forecast_vs_actual(series: pd.DataFrame):
+    """Forecast, actual and persistence for one region and horizon at a time (a menu picks which),
+    over the latest FORECAST_CHART_DAYS days, with the 0.85-0.95 range shaded where it was served."""
+    import plotly.graph_objects as go
+    recent = series.loc[series.forecast_time >= series.forecast_time.max() - pd.Timedelta(days=FORECAST_CHART_DAYS)]
+    targets = ["national"] + [t for t in SG_REGIONS]
+    fig, groups = go.Figure(), []
+    for t in targets:
+        for h in sorted(recent.horizon_hours.unique()):
+            g = recent.loc[(recent.region == t) & (recent.horizon_hours == h)]
+            if g.empty:
+                continue
+            # On a full hourly clock, so hours with no forecast (pipeline paused) show as gaps.
+            g = g.set_index("forecast_time").sort_index()
+            g = g[~g.index.duplicated()].asfreq("h").reset_index()
+            num = g.select_dtypes("number").columns
+            g[num] = g[num].round(1)   # the chart shows 0.1 µg/m³; full precision only bloats the page
+            g["forecast_time"] = g.forecast_time.dt.tz_localize(None)   # Singapore time; shorter labels in the page
+            first, label = len(fig.data), f"{t.title()} · +{int(h)} h"
+            show = not groups   # the first group is visible; the menu switches the rest
+            if BAND_LOW in g and g[BAND_LOW].notna().any():
+                fig.add_trace(go.Scatter(x=g.forecast_time, y=g[BAND_LOW], mode="lines", line=dict(width=0),
+                                         hoverinfo="skip", showlegend=False, visible=show))
+                fig.add_trace(go.Scatter(x=g.forecast_time, y=g[BAND_HIGH], mode="lines", line=dict(width=0),
+                                         fill="tonexty", fillcolor="rgba(235,104,52,0.32)", name="Range (0.85–0.95)",
+                                         customdata=g[BAND_LOW], visible=show,
+                                         hovertemplate="Range: %{customdata:.1f}–%{y:.1f}<extra></extra>"))
+            for y, name, color, dash in ((g.actual_pm25, "Actual", SERIES[0], None),
+                                         (g.forecast_pm25, "Forecast", SERIES[1], None),
+                                         (g.persistence_pm25, "Persistence (same as now)", INK_2, "dot")):
+                fig.add_trace(go.Scatter(x=g.forecast_time, y=y, name=name, mode="lines", visible=show,
+                                         line=dict(color=color, width=1.5, dash=dash),
+                                         hovertemplate=f"{name}: %{{y:.1f}}<extra></extra>"))
+            groups.append((label, first, len(fig.data)))
+    n = len(fig.data)
+    buttons = [dict(label=label, method="update",
+                    args=[{"visible": [a <= i < b for i in range(n)]},
+                          {"title.text": f"Forecast vs actual: {label} (latest {FORECAST_CHART_DAYS} days)"}])
+               for label, a, b in groups]
+    fig.add_hline(y=PM25_ELEVATED_THRESHOLD, line=dict(color=INK_2, width=1, dash="dash"),
+                  annotation_text=f"Elevated ({PM25_ELEVATED_THRESHOLD:g} µg/m³)", annotation_position="top left")
+    title = f"Forecast vs actual: {groups[0][0]} (latest {FORECAST_CHART_DAYS} days)" if groups else "Forecast vs actual"
+    return _layout(fig, title, "PM2.5 (µg/m³)", height=440,
+                   margin=dict(l=60, r=20, t=96, b=40),
+                   legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1, xanchor="right", bgcolor="rgba(0,0,0,0)",
+                               traceorder="normal"),
+                   updatemenus=[dict(type="dropdown", buttons=buttons, active=0, x=0, xanchor="left", y=1.03,
+                                     yanchor="bottom", showactive=True, bgcolor=SURFACE, bordercolor=GRID,
+                                     font=dict(color=INK))])
+
+
 def figures(metrics: pd.DataFrame, runs: pd.DataFrame, series: pd.DataFrame) -> list:
     import plotly.graph_objects as go
     figs = []
@@ -126,12 +184,7 @@ def figures(metrics: pd.DataFrame, runs: pd.DataFrame, series: pd.DataFrame) -> 
                             hovermode="closest"))
 
     if not series.empty:
-        fig = go.Figure()
-        _line(fig, series.forecast_time, series.actual_pm25, "Actual", SERIES[0], hover_fmt=".1f")
-        _line(fig, series.forecast_time, series.forecast_pm25, "Forecast (+6 h)", SERIES[1], hover_fmt=".1f")
-        fig.add_hline(y=PM25_ELEVATED_THRESHOLD, line=dict(color=INK_2, width=1, dash="dash"),
-                      annotation_text=f"Elevated ({PM25_ELEVATED_THRESHOLD:g} µg/m³)", annotation_position="top left")
-        figs.append(_layout(fig, "National PM2.5: forecast 6 hours ahead vs actual", "PM2.5 (µg/m³)", height=380))
+        figs.append(forecast_vs_actual(series))
 
     q = _metric(metrics, "model_quality", "mae")
     if not q.empty:

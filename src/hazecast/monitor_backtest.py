@@ -38,7 +38,7 @@ import pandas as pd
 
 from hazecast import model_monitor as mm
 from hazecast.config import GOLD_DIR, MODELS_DIR, MONITORING_DIR, MIN_TRAIN_ROWS, MONITOR_WINDOW_DAYS
-from hazecast.pipeline_store import TARGETS, connect, iso
+from hazecast.pipeline_store import BAND_COLUMNS, TARGETS, connect, iso
 
 log = logging.getLogger(__name__)
 BURN_IN_DAYS = 90
@@ -61,7 +61,13 @@ def refit_pre_holdout(gold: pd.DataFrame, manifest: dict):
                 raise ValueError(f"Insufficient pre-test or final-test rows: {target}, h={horizon}")
             est = _fit(entry["model"], train, cols, target)
             models[(target, int(horizon))] = (entry["model"], est)
+            # The quantile range, refitted the same way, sorted so the three values never cross.
+            band_names = sorted((n for n in (entry.get("band") or {}) if n in BAND_COLUMNS), key=lambda n: BAND_COLUMNS[n])
+            band = (np.sort(np.column_stack([_predict(est if n == entry["model"] else _fit(n, train, cols, target),
+                                                      test, cols, target) for n in band_names]), axis=1)
+                    if band_names else None)
             frames.append(pd.DataFrame(dict(
+                **{BAND_COLUMNS[n]: band[:, i] for i, n in enumerate(band_names)},
                 as_of_time=test.date.to_numpy(), forecast_time=(test.date + pd.Timedelta(hours=horizon)).to_numpy(),
                 region=target, horizon_hours=int(horizon), model=entry["model"],
                 actual_pm25=test[f"label_{target}"].to_numpy(dtype=float),
@@ -82,11 +88,14 @@ def write_ledger(db_path: Path, holdout: pd.DataFrame, gold: pd.DataFrame, manif
     for suffix in ("", "-wal", "-shm"):
         Path(str(db_path) + suffix).unlink(missing_ok=True)
     db = connect(db_path)
+    from hazecast.inference import elevated
+    band_cols = [c for c in BAND_COLUMNS.values() if c in holdout]
     forecasts = [(hashlib.sha256(f"{iso(o)}|{r}|{h}".encode()).hexdigest(), iso(o), iso(o), iso(f), r, int(h), m,
-                  None, manifest_sha, float(p), float(thr), int(p >= thr), 0.0, float(pers))
-                 for o, f, r, h, m, p, thr, pers in holdout[["as_of_time", "forecast_time", "region", "horizon_hours",
-                                                             "model", "predicted_pm25", "threshold",
-                                                             "persistence_pm25"]].itertuples(index=False)
+                  None, manifest_sha, float(p), float(thr), int(elevated(p, pers, int(h), thr)), 0.0, float(pers),
+                  *[None if not np.isfinite(v) else float(v) for v in band])
+                 for o, f, r, h, m, p, thr, pers, *band in holdout[["as_of_time", "forecast_time", "region", "horizon_hours",
+                                                                    "model", "predicted_pm25", "threshold",
+                                                                    "persistence_pm25", *band_cols]].itertuples(index=False)
                  if np.isfinite(pers)]
     actual_rows = []
     for target in TARGETS:
@@ -97,7 +106,8 @@ def write_ledger(db_path: Path, holdout: pd.DataFrame, gold: pd.DataFrame, manif
         # and a positional insert broke the replay when it did.
         db.executemany("INSERT OR IGNORE INTO forecasts (forecast_id, issued_at, as_of_time, forecast_time, region, "
                        "horizon_hours, model, model_run_id, manifest_sha256, forecast_pm25, threshold, elevated_flag, "
-                       "feature_age_hours, persistence_pm25) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", forecasts)
+                       "feature_age_hours, persistence_pm25" + "".join(f", {c}" for c in band_cols)
+                       + ") VALUES (" + ",".join("?" * (14 + len(band_cols))) + ")", forecasts)
         db.executemany("INSERT OR REPLACE INTO actuals VALUES (?,?,?,?,?,?)", actual_rows)
     log.info("backtest ledger: %d forecasts, %d actuals -> %s", len(forecasts), len(actual_rows), db_path)
     return db
@@ -114,7 +124,8 @@ def run_backtest(*, step_days: int = 7, window_days: int = MONITOR_WINDOW_DAYS,
     cols = manifest["feature_columns"]
     gold = mm.prepare_gold(pd.read_parquet(gold_path))
     models, holdout, reference = refit_pre_holdout(gold, manifest)
-    holdout.drop(columns="persistence_pm25").to_csv(models_dir / "holdout_predictions.csv", index=False)
+    holdout.drop(columns=["persistence_pm25", *[c for c in BAND_COLUMNS.values() if c in holdout]]).to_csv(
+        models_dir / "holdout_predictions.csv", index=False)
 
     forecasts = holdout.rename(columns={"predicted_pm25": "forecast_pm25"})
     burn_in_end = pd.to_datetime(forecasts.forecast_time).min() + pd.Timedelta(days=BURN_IN_DAYS)

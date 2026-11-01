@@ -568,6 +568,14 @@ By the teammate's own measure, the per-horizon choice matches the per-cell table
 and flat 0.95 passes most often, which is the trade-off against flat 0.95's higher false-alarm
 rate at +6/+12 h.
 
+**Monitoring dashboard: forecast against actual for every region and horizon.** The chart
+(`hazecast.dashboard.forecast_vs_actual`) has a menu for all 18 region × horizon combinations and
+shows the latest 90 days: actual, forecast, persistence, and the 0.85–0.95 range shaded where it
+was served. Hours with no forecast are gaps, not straight lines. The holdout replay
+(`monitor_backtest`) now refits the range models too and applies the alert rule to its flags, so
+the replay dashboard shows the range over the 2026 haze. Replay of this branch's models
+(118 weekly windows): 106 no action, 2 investigate, 10 retrain, all retrains in the 2026 haze.
+
 **Alert rule.** The model-or-persistence rule at +12/+24 h (switched on 1 Nov 2026, §4.5) applies on top: the flag is raised when the primary forecast or the current reading reaches 56.
 
 ---
