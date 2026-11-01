@@ -125,19 +125,21 @@ One model is trained per **region and horizon** (18 in total). Candidates are co
 
 ## Getting started
 
-### Prerequisites
-
-- **Docker Desktop**, installed and running
-- **Git** and **Git LFS**
-- A free **NASA FIRMS map key**: <https://firms.modaps.eosdis.nasa.gov/api/map_key/>
-
 ### Option 1: View the demo (no setup)
 
-Open **`docs/index.html`** in any modern browser. The app loads an embedded snapshot and labels it **Demo**.
+Open **`docs/index.html`** in any modern browser. The app shows a saved snapshot from 16 Oct 2026, labelled **Demo**.
 
-### Option 2: Run the full system
+### Option 2: Run the full system with live data
 
-**1. Clone the repository**
+**Step 1. Install the prerequisites**
+
+- **Docker Desktop**, installed and running
+- **Git** and **Git LFS** (optional, see Step 2)
+- A free **NASA FIRMS map key**: <https://firms.modaps.eosdis.nasa.gov/api/map_key/>
+
+On Windows, run the commands below in **Git Bash** or **PowerShell**.
+
+**Step 2. Get the code**
 
 ```bash
 git lfs install
@@ -145,36 +147,57 @@ git clone https://github.com/mariamustafadoola-gif/Haze-Cast-SG.git
 cd Haze-Cast-SG
 ```
 
-**2. Configure environment variables**
+Without Git: on the GitHub page, click **Code**, then **Download ZIP**, unzip it, and open a terminal inside the unzipped folder. Step 5 downloads any data the ZIP leaves out.
+
+**Step 3. Add your key**
 
 ```bash
 cp .env.example .env
 ```
 
-Open `.env` and set `FIRMS_MAP_KEY`. `DATA_GOV_SG_API_KEY` is optional.
+Open `.env` in a text editor and paste your key after `FIRMS_MAP_KEY=`. Save the file.
 
 > [!CAUTION]
-> `.env` contains credentials and is excluded by `.gitignore`. **Do not commit it.**
+> `.env` holds your key and is excluded from Git. **Never commit or share it.**
 
-**3. Build and start the services**
+**Step 4. Start all services**
 
 ```bash
 docker compose up -d --build
 ```
 
-**4. Load the historical data (first run only)**
+The first build takes **10 to 25 minutes**. It is ready when every service shows **Started** or **Healthy** (`airflow-init` shows **Exited**, which is normal).
 
-Open Airflow at <http://localhost:8080> (local credentials **admin / admin**), locate **`hazecast_backfill`** and select **Trigger DAG**. This downloads missing history from April 2014 onwards, builds every data layer and trains the initial models.
+**Step 5. Train the models (first time only, about 2 hours)**
 
-**5. Open the app**
+1. Open Airflow at <http://localhost:8080> and sign in with **admin / admin**.
+2. Find **`hazecast_backfill`** and click the **play button**, then **Trigger DAG**.
+3. Wait. The backfill downloads the history, then starts **`hazecast_retrain`** by itself to train the models.
 
-Go to <http://localhost:8000>. The hourly job produces a new forecast at **10 minutes past every hour**.
+Training is complete when **`hazecast_retrain`** shows a **dark green** run. Keep the computer plugged in and awake until then.
 
-**6. Stop the services**
+**Step 6. Open the app**
+
+Go to <http://localhost:8000> and select **Live** at the bottom. The first live forecast appears at the next **10 minutes past the hour** after training finishes, and a new one every hour after that.
+
+**Step 7. Stop and restart**
 
 ```bash
-docker compose down
+docker compose down     # stop
+docker compose up -d    # start again later (no retraining needed)
 ```
+
+### Share the app with a QR code (optional)
+
+To let others open the live app on their phones, for example during a presentation:
+
+1. Install **ngrok** (Microsoft Store on Windows) and run `ngrok config add-authtoken <your token>` once.
+2. In the ngrok dashboard, open **Domains** and copy your free domain.
+3. With the app running, start the tunnel:
+   ```bash
+   ngrok http --url=<your-domain> 8000
+   ```
+4. Make a QR code for `https://<your-domain>`. It works while your computer, Docker and ngrok are running.
 
 ### Service endpoints
 

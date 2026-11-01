@@ -206,6 +206,11 @@ PM2.5 from **NEA** via data.gov.sg, wind and rain from **Open-Meteo**, and fire 
 | A yellow note says the data is **many hours old** | The hourly job is skipping because data is late, or Docker was off | Check `hazecast_hourly` in Airflow at <http://localhost:8080>. It skips on purpose rather than show an old forecast as current |
 | **Use my location** does nothing | The page was opened as a file, or location is blocked | Open it via <http://localhost:8000>, or allow location in your browser settings |
 | The page looks unstyled or broken | An old copy is cached | Refresh with **Ctrl + F5** |
+| **Live** shows everything **greyed out** with "Waiting for a new forecast" | The newest forecast was made from old data. On a fresh setup, the models have not been trained yet | Check that `data/models/hourly/model_manifest.json` exists. If not, run the first-time training (see [Getting started](../README.md#getting-started)). Otherwise wait for the next hourly run |
+| **Refresh** changes nothing | Refresh reloads the latest forecast; it does not fetch new data | New data arrives with `hazecast_hourly` at 10 minutes past each hour. Check it in Airflow |
+| `hazecast_hourly` shows **red** runs in Airflow | No trained models yet, or a data source was offline | Expected before the first training run. Afterwards, open the run's **Logs** to see which step failed |
+| An Airflow task fails with **`PermissionError: [Errno 13] Permission denied`** | Files in `data/` or `reports/` were created earlier by another container running as root (for example a notebook run), so Airflow cannot overwrite them. Most common on Windows | Run this once from the project folder, then select the failed task in Airflow and choose **Clear** to rerun it: `docker compose exec -u root airflow-scheduler chmod -R a+rwX /opt/airflow/data /opt/airflow/reports`. In Git Bash, put `MSYS_NO_PATHCONV=1 ` in front of the command |
+| The QR code link does not open | The computer, Docker or ngrok is not running | Start Docker Desktop, run `docker compose up -d`, then run the ngrok command again |
 
 ---
 
