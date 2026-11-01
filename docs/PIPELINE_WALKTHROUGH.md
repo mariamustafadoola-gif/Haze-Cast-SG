@@ -509,9 +509,9 @@ Verified in headless Chrome: with live data (rounded values, notice shown for a 
 
 The API container now mounts `serving/` and `src/` like the Airflow containers, so dashboard or API edits apply on restart without rebuilding the image.
 
-### 3.10 This branch (`e2e-pipeline-xgb-multiq`): three quantile models, one chosen per horizon
+### 3.10 Three quantile models, one chosen per horizon (from `e2e-pipeline-xgb-multiq`; live since 1 Nov)
 
-> Applies to `e2e-pipeline-xgb-multiq`, branched from `e2e-pipeline-fire-fallback` on 31 Oct. Production keeps the flat 0.85 until the team decides.
+> Built on `e2e-pipeline-xgb-multiq` (branched 31 Oct), chosen by the team on 1 Nov, merged into `e2e-pipeline-fire-fallback` and promoted the same day. Before that, production used a flat 0.85.
 
 **Why.** Rechecked on the corrected fire features (`experiments/quantile_recheck_new_fire.py`,
 `reports/model_comparison/quantile_recheck_*.csv`), the flat 0.85 falls behind persistence at
@@ -533,7 +533,7 @@ F2 gap between a cell's best quantile and the next was a median 0.02). Out of ti
 - **The range is served:** inference stores all three values, sorted so they never cross (`pm25_q85/q90/q95`, nullable ledger columns). The dashboard shows them as a shaded range on the bar and as "range lo–hi" in the text.
 - **The gate handles the range models:** promote, shadow and rollback copy the range models; the integrity check smoke-tests each of them; the like-for-like refit uses each model's recorded quantile.
 
-**Result (31 Oct – 1 Nov 2026, Airflow image, staging `data/models/hourly_staging/multiq_check_20261101`; check only, not promoted):**
+**Result (31 Oct – 1 Nov 2026, Airflow image, staging `data/models/hourly_staging/multiq_check_20261101`):**
 
 | Horizon | Quantile chosen | Beat 0.85 in | Holdout F2: challenger / champion / persistence | Holdout MAE: challenger / champion |
 |---|---|---|---|---|
@@ -575,6 +575,8 @@ was served. Hours with no forecast are gaps, not straight lines. The holdout rep
 (`monitor_backtest`) now refits the range models too and applies the alert rule to its flags, so
 the replay dashboard shows the range over the 2026 haze. Replay of this branch's models
 (118 weekly windows): 106 no action, 2 investigate, 10 retrain, all retrains in the 2026 haze.
+
+**Promotion (1 Nov 2026).** Promoted through the gate after the merge. The re-check compared it with that morning's freshly retrained 0.85 champion: integrity passed, all 18 groups within 0.10 F2 of persistence (9 ahead), F2 better than the champion in 13 of 18 groups with no severe drops, recent window not judged. No shadow run: with the haze season over it would have shown little, and the 7-day early-life check and `governance rollback` cover the risk. The first live run served 0.90 / 0.90 / 0.95 with the range on all 18 forecasts.
 
 **Alert rule.** The model-or-persistence rule at +12/+24 h (switched on 1 Nov 2026, §4.5) applies on top: the flag is raised when the primary forecast or the current reading reaches 56.
 
