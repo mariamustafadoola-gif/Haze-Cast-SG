@@ -13,6 +13,9 @@ SGT = ZoneInfo("Asia/Singapore")
 REGIONS = ("north", "south", "east", "west", "central")
 TARGETS = REGIONS + ("national",)
 HORIZONS = (6, 12, 24)
+# Quantile range served with each forecast (config.XGB_QUANTILE_BAND); NULL for forecasts from a
+# manifest without range models.
+BAND_COLUMNS = {"xgboost_q85": "pm25_q85", "xgboost_q90": "pm25_q90", "xgboost_q95": "pm25_q95"}
 
 
 def timestamp(value):
@@ -62,8 +65,13 @@ def connect(path):
     ''')
     # Added after the first archives were written: how long the fire features had been
     # carried forward because FIRMS was late (0 = current).
-    if "fire_carried_hours" not in {r["name"] for r in db.execute("PRAGMA table_info(forecasts)")}:
+    have = {r["name"] for r in db.execute("PRAGMA table_info(forecasts)")}
+    if "fire_carried_hours" not in have:
         db.execute("ALTER TABLE forecasts ADD COLUMN fire_carried_hours REAL NOT NULL DEFAULT 0")
+    # Added with the quantile range; NULL where no range was served.
+    for col in BAND_COLUMNS.values():
+        if col not in have:
+            db.execute(f"ALTER TABLE forecasts ADD COLUMN {col} REAL")
     return db
 
 

@@ -127,6 +127,10 @@ The map colours are **advice**, so they change when you change **Who's going out
 - The app remembers your **region name** (for example "Central") in your browser, so it opens on the same region next time.
 - Location only works on a secure web address (https) or on localhost. If you would rather not share it, just **tap your region on the map**.
 
+### Hazy now, so a mask is suggested
+
+At **In 12 hrs** and **Tomorrow**, if the air is already unhealthy now (56 µg/m³ or above), the app suggests at least a mask, even when the forecast number is lower. Long haze episodes often last longer than forecasts expect. The **How sure are we?** card then says *"The air is hazy now, so we suggest a mask in case it stays."*
+
 ### Who's going out?
 
 1. Tap **Everyone** or **Children, Elderly and Asthmatic Patients**.
@@ -145,7 +149,8 @@ This card compares **your region** at four times: **Now**, **In 6 hrs**, **In 12
 
 This card reports how reliable the selected forecast has been, so users can judge how much weight to give it.
 
-- **On a forecast tab**, the ring shows how many **truly unhealthy hours** that forecast warned about when we tested it on April 2024 to October 2026. For example, **8/10** for the 6-hour forecast.
+- **On a forecast tab**, the card first shows a **likely range** for your region, for example *"Central: likely 120 to 140 µg/m³"*. It comes from three models that forecast cautiously at different levels (85th, 90th and 95th percentile). The number on the map is the one the advice is based on.
+- The ring shows how many **truly unhealthy hours** that forecast warned about when we tested it on April 2024 to October 2026. For example, **8/10** for the 6-hour forecast.
 - **"Right N in 10 times it warned"** tells you how often a warning turned out to be a real unhealthy hour.
 - **On the Now tab**, the ring says **Real**, because those are measured readings, not a forecast.
 - The forecast **leans to the safe side** on purpose: the number shown is a cautious estimate, so the real level is usually **at or below** it.

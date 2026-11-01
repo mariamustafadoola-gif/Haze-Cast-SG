@@ -1,0 +1,302 @@
+{
+  "passed": true,
+  "checks": {
+    "integrity": {
+      "passed": true,
+      "problems": []
+    },
+    "skill": {
+      "passed": true,
+      "share_within_f2_tolerance": 1.0,
+      "groups_beating_persistence": 8,
+      "groups_with_haze": 18,
+      "tolerance": 0.1,
+      "required": 0.5,
+      "note": null
+    },
+    "no_regression": {
+      "passed": true,
+      "share_f2_within_tolerance": 1.0,
+      "f2_tolerance": 0.05,
+      "severe_f2_drops": {},
+      "mae_blowups": {},
+      "groups_f2_improved": 13,
+      "groups_compared": 18,
+      "champion_compared_like_for_like": 18,
+      "note": null
+    },
+    "recent_window": {
+      "passed": true,
+      "window_days": 90,
+      "horizons": {
+        "6": {
+          "judged": false,
+          "n_elevated": 0
+        },
+        "12": {
+          "judged": false,
+          "n_elevated": 0
+        },
+        "24": {
+          "judged": false,
+          "n_elevated": 0
+        }
+      },
+      "note": "fewer than 12 haze hours in the last 90 days: not judged"
+    }
+  },
+  "groups": {
+    "north|6": {
+      "model": "xgboost_q90",
+      "holdout_mae": 10.567421126762323,
+      "persistence_mae": 5.881921159945628,
+      "holdout_f2": 0.7339449541284404,
+      "persistence_f2": 0.6843575418994413,
+      "f2_vs_persistence": 0.049587412228999095,
+      "champion_mae": 8.734788725524128,
+      "champion_f2": 0.772704465629704,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.7711821410451547,
+      "mae_ratio": 1.2098084405731553,
+      "f2_change": -0.038759511501263555
+    },
+    "south|6": {
+      "model": "xgboost_q90",
+      "holdout_mae": 11.599650888344854,
+      "persistence_mae": 5.7653828726778436,
+      "holdout_f2": 0.7354132901134521,
+      "persistence_f2": 0.7450980392156863,
+      "f2_vs_persistence": -0.009684749102234158,
+      "champion_mae": 9.802528597447576,
+      "champion_f2": 0.750946571308372,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.7546768707482994,
+      "mae_ratio": 1.1833325221173259,
+      "f2_change": -0.015533281194919812
+    },
+    "east|6": {
+      "model": "xgboost_q90",
+      "holdout_mae": 10.289560649373264,
+      "persistence_mae": 5.839057544177616,
+      "holdout_f2": 0.7928692699490663,
+      "persistence_f2": 0.7733333333333333,
+      "f2_vs_persistence": 0.01953593661573294,
+      "champion_mae": 8.537517020148176,
+      "champion_f2": 0.7924068268895855,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.8022322985699337,
+      "mae_ratio": 1.2052169998713138,
+      "f2_change": 0.0004624430594807327
+    },
+    "west|6": {
+      "model": "xgboost_q90",
+      "holdout_mae": 8.531488065647405,
+      "persistence_mae": 6.2312188491164475,
+      "holdout_f2": 0.8236865538735529,
+      "persistence_f2": 0.8241042345276873,
+      "f2_vs_persistence": -0.00041768065413438915,
+      "champion_mae": 7.144362836365901,
+      "champion_f2": 0.7878690629011553,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.7655954631379962,
+      "mae_ratio": 1.1941566044519498,
+      "f2_change": 0.035817490972397614
+    },
+    "central|6": {
+      "model": "xgboost_q90",
+      "holdout_mae": 8.872403895705256,
+      "persistence_mae": 7.1411418214771185,
+      "holdout_f2": 0.7532360231341229,
+      "persistence_f2": 0.7583798882681564,
+      "f2_vs_persistence": -0.005143865134033532,
+      "champion_mae": 7.786890789389773,
+      "champion_f2": 0.6900517538815412,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.7016794762311415,
+      "mae_ratio": 1.1394026365175915,
+      "f2_change": 0.06318426925258169
+    },
+    "national|6": {
+      "model": "xgboost_q90",
+      "holdout_mae": 7.2525955215715925,
+      "persistence_mae": 4.583724512913458,
+      "holdout_f2": 0.7767695099818511,
+      "persistence_f2": 0.7830374753451677,
+      "f2_vs_persistence": -0.00626796536331653,
+      "champion_mae": 6.147492172459861,
+      "champion_f2": 0.7836812144212524,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.7813688212927756,
+      "mae_ratio": 1.179764905445912,
+      "f2_change": -0.006911704439401256
+    },
+    "north|12": {
+      "model": "xgboost_q90",
+      "holdout_mae": 10.811064687136517,
+      "persistence_mae": 6.4123005801305295,
+      "holdout_f2": 0.6780464675201517,
+      "persistence_f2": 0.6229050279329609,
+      "f2_vs_persistence": 0.055141439587190866,
+      "champion_mae": 9.096135021920132,
+      "champion_f2": 0.6986573843858777,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.6900785854616895,
+      "mae_ratio": 1.18853388401598,
+      "f2_change": -0.020610916865725915
+    },
+    "south|12": {
+      "model": "xgboost_q90",
+      "holdout_mae": 12.166565095097743,
+      "persistence_mae": 6.337155547498187,
+      "holdout_f2": 0.6704905063291139,
+      "persistence_f2": 0.6544117647058824,
+      "f2_vs_persistence": 0.01607874162323153,
+      "champion_mae": 10.10436228334774,
+      "champion_f2": 0.6584960531782301,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.6578385305425032,
+      "mae_ratio": 1.2040903477054232,
+      "f2_change": 0.011994453150883766
+    },
+    "east|12": {
+      "model": "xgboost_q90",
+      "holdout_mae": 10.7392694862209,
+      "persistence_mae": 6.662164612037708,
+      "holdout_f2": 0.7116168478260869,
+      "persistence_f2": 0.7219047619047619,
+      "f2_vs_persistence": -0.01028791407867502,
+      "champion_mae": 8.92363623404866,
+      "champion_f2": 0.6698216235893703,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.6719440353460973,
+      "mae_ratio": 1.2034633869592963,
+      "f2_change": 0.041795224236716666
+    },
+    "west|12": {
+      "model": "xgboost_q90",
+      "holdout_mae": 9.155922196130117,
+      "persistence_mae": 7.2225797679477886,
+      "holdout_f2": 0.7312614259597806,
+      "persistence_f2": 0.7687296416938111,
+      "f2_vs_persistence": -0.037468215734030474,
+      "champion_mae": 7.798163636276219,
+      "champion_f2": 0.6477017036322725,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.6546489563567363,
+      "mae_ratio": 1.1741126017845729,
+      "f2_change": 0.08355972232750808
+    },
+    "central|12": {
+      "model": "xgboost_q90",
+      "holdout_mae": 9.704804902757175,
+      "persistence_mae": 8.050806744017404,
+      "holdout_f2": 0.625175217269414,
+      "persistence_f2": 0.6899441340782123,
+      "f2_vs_persistence": -0.06476891680879826,
+      "champion_mae": 8.501018473296341,
+      "champion_f2": 0.5978415222948026,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.5504587155963303,
+      "mae_ratio": 1.141604965715838,
+      "f2_change": 0.027333694974611467
+    },
+    "national|12": {
+      "model": "xgboost_q90",
+      "holdout_mae": 7.933880081348872,
+      "persistence_mae": 5.456435823060188,
+      "holdout_f2": 0.6765676567656765,
+      "persistence_f2": 0.73767258382643,
+      "f2_vs_persistence": -0.06110492706075343,
+      "champion_mae": 6.7543763730169815,
+      "champion_f2": 0.6628571428571428,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.6856060606060606,
+      "mae_ratio": 1.1746280697421427,
+      "f2_change": 0.013710513908533728
+    },
+    "north|24": {
+      "model": "xgboost_q95",
+      "holdout_mae": 13.977735679198629,
+      "persistence_mae": 6.146245238527118,
+      "holdout_f2": 0.6163522012578616,
+      "persistence_f2": 0.5893854748603352,
+      "f2_vs_persistence": 0.026966726397526397,
+      "champion_mae": 8.743039905819511,
+      "champion_f2": 0.6212574850299402,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.6341586659929257,
+      "mae_ratio": 1.5987271966921732,
+      "f2_change": -0.00490528377207855
+    },
+    "south|24": {
+      "model": "xgboost_q95",
+      "holdout_mae": 15.899252795355327,
+      "persistence_mae": 6.295075276618901,
+      "holdout_f2": 0.6066571224051539,
+      "persistence_f2": 0.6053921568627451,
+      "f2_vs_persistence": 0.0012649655424088468,
+      "champion_mae": 9.929729995419622,
+      "champion_f2": 0.5945059450594506,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.5850844664194479,
+      "mae_ratio": 1.601176749286166,
+      "f2_change": 0.012151177345703257
+    },
+    "east|24": {
+      "model": "xgboost_q95",
+      "holdout_mae": 14.267564525805877,
+      "persistence_mae": 6.851668782876836,
+      "holdout_f2": 0.673871582962492,
+      "persistence_f2": 0.6266666666666667,
+      "f2_vs_persistence": 0.04720491629582535,
+      "champion_mae": 8.98785375337862,
+      "champion_f2": 0.5624092888243831,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.5343783398646241,
+      "mae_ratio": 1.5874273121592086,
+      "f2_change": 0.11146229413810893
+    },
+    "west|24": {
+      "model": "xgboost_q95",
+      "holdout_mae": 12.592020802757256,
+      "persistence_mae": 7.492925811717758,
+      "holdout_f2": 0.7036307345904869,
+      "persistence_f2": 0.6970684039087948,
+      "f2_vs_persistence": 0.006562330681692097,
+      "champion_mae": 8.231961074918535,
+      "champion_f2": 0.6298121342777949,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.646551724137931,
+      "mae_ratio": 1.5296501876233506,
+      "f2_change": 0.07381860031269194
+    },
+    "central|24": {
+      "model": "xgboost_q95",
+      "holdout_mae": 12.587054434091327,
+      "persistence_mae": 8.030518773807364,
+      "holdout_f2": 0.6618407445708376,
+      "persistence_f2": 0.6759776536312849,
+      "f2_vs_persistence": -0.014136909060447289,
+      "champion_mae": 8.892789122826084,
+      "champion_f2": 0.47224643998837545,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.4468209786111925,
+      "mae_ratio": 1.4154225699317182,
+      "f2_change": 0.18959430458246218
+    },
+    "national|24": {
+      "model": "xgboost_q95",
+      "holdout_mae": 10.716441070055074,
+      "persistence_mae": 5.593814619989117,
+      "holdout_f2": 0.666443402545211,
+      "persistence_f2": 0.6706114398422091,
+      "f2_vs_persistence": -0.004168037296998106,
+      "champion_mae": 7.155115264616319,
+      "champion_f2": 0.6063907044299202,
+      "champion_basis": "refitted on this holdout",
+      "champion_f2_recorded": 0.5432746346946422,
+      "mae_ratio": 1.4977314374025985,
+      "f2_change": 0.06005269811529079
+    }
+  }
+}

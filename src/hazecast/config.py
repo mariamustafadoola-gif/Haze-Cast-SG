@@ -58,6 +58,12 @@ WEATHER_POINTS = {
 # own data profiling:
 #   Normal: 0-55, Elevated: 56-150, High: 151-250, Very High: >250
 PM25_ELEVATED_THRESHOLD = 56.0
+# Alert rule (approved 1 Nov 2026): at these horizons a forecast is also flagged elevated when
+# the current reading (persistence) is at or above the threshold, whatever the model says. Once
+# an episode is under way "same as now" is hard to beat a day ahead; on the 2024-26 holdout this
+# lifts +24 h recall 0.56 -> 0.74 (+12 h 0.70 -> 0.77) for false alarms 1.7% -> 2.0% of calm
+# hours. The monitors keep scoring the model's own forecast_pm25, not this flag.
+ALERT_PERSISTENCE_HORIZONS = (12, 24)
 
 # Silver gap filling (data team, 2026-10). A gap of up to this many hours
 # in an hourly series is filled by straight-line interpolation between the
@@ -219,6 +225,25 @@ XGB_PARAMS = dict(
 # conservative/precise alert, higher to catch more true events at the cost
 # of more false alarms; 0.70-0.95 were swept, 0.85 was the best balance.
 XGB_QUANTILE_ALPHA = 0.85
+
+# Hourly quantile range (e2e-pipeline-xgb-multiq). Every region and horizon gets three quantile
+# models. All three are served (the range on the dashboard and the pm25_q* ledger columns); one
+# per horizon is the primary forecast that drives the alert. The primary is chosen by
+# hourly_model._choose_quantile on F2 pooled over the six targets, from the forward folds plus
+# the haze seasons below. It is chosen per horizon, not per region: per-region values did not
+# reproduce on recheck (docs/PIPELINE_WALKTHROUGH.md section 3.11). The live choice is kept
+# unless another wins in SELECTION_SWITCH_CONFIDENCE of resamples. Changing these values also
+# needs matching pm25_q* ledger columns (pipeline_store.BAND_COLUMNS).
+XGB_QUANTILE_BAND = (0.85, 0.90, 0.95)
+# Extra validation folds for the quantile choice only: each season is held out in turn and the
+# model trained on the remaining pre-holdout rows (the method used for XGB_Tuned). The forward
+# folds see too little haze to choose a quantile on their own: 2015 falls in the first training
+# block and is never validated on.
+QUANTILE_SELECTION_HAZE_SEASONS = (2015, 2019)
+# XGB_Tuned's dual bar, reported for every range model in the manifest and eval_summary.csv but
+# never used to choose: haze-hour recall >= DUAL_BAR_RATIO x persistence's AND MAE on haze hours
+# <= DUAL_BAR_RATIO x persistence's, in each held-out haze season and on the final holdout.
+DUAL_BAR_RATIO = 1.15
 
 
 # ---------------------------------------------------------------------------

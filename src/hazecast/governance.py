@@ -108,21 +108,44 @@ def pickle_modules(path: Path) -> set[str]:
     return mods
 
 
+def entry_artifacts(entry: dict) -> list[str]:
+    """Every file an entry needs: the primary model and its quantile range models."""
+    files = [entry["artifact"]] if entry.get("artifact") else []
+    return list(dict.fromkeys(files + list((entry.get("band") or {}).values())))
+
+
+def _refit_as_trained(name: str, entry: dict, train: pd.DataFrame, cols: list[str], target: str, horizon: int):
+    """Refit one manifest choice as it was trained. xgboost_q85's quantile is a setting that differs
+    between branches (0.85 on the main line, 0.95 or a per-cell table on the tuned branches), so it
+    comes from the entry's recorded quantile_alpha (manifests from before it was recorded used the
+    flat XGB_QUANTILE_ALPHA), never from the running branch's config. Without this, a tuned branch
+    would refit the champion with the challenger's quantile and compare the challenger with itself."""
+    import inspect
+    from hazecast.hourly_model import _fit
+    from hazecast.train import quantile_alpha
+    if quantile_alpha(name) is not None:   # xgboost_q85, or a range model such as xgboost_q95
+        from xgboost import XGBRegressor
+        alpha = entry.get("quantile_alpha") or (C.XGB_QUANTILE_ALPHA if name == "xgboost_q85" else quantile_alpha(name))
+        model = XGBRegressor(**{**C.XGB_PARAMS, "objective": "reg:quantileerror", "quantile_alpha": alpha})
+        return model.fit(train[cols], train[f"label_{target}"])
+    takes_horizon = "horizon" in inspect.signature(_fit).parameters   # tuned branches pass the horizon
+    return _fit(name, train, cols, target, horizon) if takes_horizon else _fit(name, train, cols, target)
+
+
 def _paired_champion_scores(gold: pd.DataFrame, champion: dict, candidate: dict) -> dict:
     """Refit the champion's chosen model per group on the challenger's pre-holdout rows (current
     features) and score it on the challenger's holdout. Returns {"t|h": metrics} for groups whose
     holdout has elevated hours; the champion's production artifacts are never used (they were
     refitted on all labels, holdout included)."""
-    import inspect
-    from hazecast.hourly_model import _labelled, _feature_columns, _complete, _before, _fit, _predict
+    from hazecast.hourly_model import _labelled, _complete, _before, _predict
     from hazecast.train import _metrics
-    takes_horizon = "horizon" in inspect.signature(_fit).parameters   # tuned branch passes the horizon
     out = {}
     for h in HORIZONS:
         lab = _labelled(gold, h)
         cols = candidate["feature_columns"]
         for t in TARGETS:
-            name = ((champion.get("models", {}).get(str(h), {}).get(t)) or {}).get("model")
+            champ_entry = (champion.get("models", {}).get(str(h), {}).get(t)) or {}
+            name = champ_entry.get("model")
             entry = candidate["models"][str(h)][t]
             if not name:
                 continue
@@ -132,7 +155,7 @@ def _paired_champion_scores(gold: pd.DataFrame, champion: dict, candidate: dict)
             train, test = _before(rows, start, h), rows.loc[rows.date >= start]
             if test.empty or (test[f"label_{t}"] >= float(candidate["threshold"])).sum() == 0:
                 continue
-            est = _fit(name, train, cols, t, h) if takes_horizon else _fit(name, train, cols, t)
+            est = _refit_as_trained(name, champ_entry, train, cols, t, h)
             out[f"{t}|{h}"] = dict(model=name, **_metrics(test[f"label_{t}"], _predict(est, test, cols, t)))
     return out
 
@@ -142,8 +165,7 @@ def _recent_window_check(gold: pd.DataFrame, candidate: dict, ledger_path: Path)
     RECENT_WINDOW_DAYS? Its model choices are refitted on rows whose labels precede the window
     (its production artifacts saw the window) and scored on the served forecasts' hours, pooled
     over the targets per horizon. Judged only with MIN_ELEVATED_FOR_RECALL haze hours or more."""
-    import inspect
-    from hazecast.hourly_model import _labelled, _complete, _before, _fit, _predict
+    from hazecast.hourly_model import _labelled, _complete, _before, _predict
     from hazecast.model_monitor import matched_forecasts
     from hazecast.pipeline_store import connect
     from hazecast.train import _metrics
@@ -161,7 +183,6 @@ def _recent_window_check(gold: pd.DataFrame, candidate: dict, ledger_path: Path)
         matched = matched_forecasts(db, start.to_pydatetime(), end.to_pydatetime())
     finally:
         db.close()
-    takes_horizon = "horizon" in inspect.signature(_fit).parameters
     cols, thr = candidate["feature_columns"], float(candidate["threshold"])
     horizons, failures = {}, []
     for h, g in matched.groupby("horizon_hours"):
@@ -174,10 +195,10 @@ def _recent_window_check(gold: pd.DataFrame, candidate: dict, ledger_path: Path)
         boundary = origins.min()
         challenger = np.full(len(g), np.nan)
         for t in g.region.unique():
-            name = candidate["models"][str(h)][t]["model"]
+            entry = candidate["models"][str(h)][t]
             rows = _complete(lab, cols, t, h)
             train = _before(rows, boundary, h)
-            est = _fit(name, train, cols, t, h) if takes_horizon else _fit(name, train, cols, t)
+            est = _refit_as_trained(entry["model"], entry, train, cols, t, h)
             sel = (g.region == t).to_numpy()
             at = lab.set_index("date").reindex(origins[sel])
             ok = np.isfinite(at[cols].to_numpy(dtype=float)).all(axis=1)
@@ -223,19 +244,20 @@ def check_candidate(candidate_dir: Path, champion_dir: Path = PRODUCTION_DIR,
             problems.append(f"h={h}: missing targets {sorted(set(TARGETS) - set(entries))}")
             continue
         for t, e in entries.items():
-            if e["model"] == "persistence" or row is None:
+            if row is None:
                 continue
-            try:
-                undeclared = pickle_modules(candidate_dir / e["artifact"]) & set(UNDECLARED_PICKLE_MODULES)
-                if undeclared:
-                    problems.append(f"{t} h={h}: artifact needs undeclared module(s) {sorted(undeclared)}; "
-                                    "re-save with hazecast.train.save_model")
-                    continue
-                pred = float(joblib.load(candidate_dir / e["artifact"]).predict(row[cols])[0])
-                if not np.isfinite(pred):
-                    problems.append(f"{t} h={h}: non-finite prediction")
-            except Exception as exc:  # noqa: BLE001 - any load/predict failure blocks promotion
-                problems.append(f"{t} h={h}: {type(exc).__name__}: {exc}")
+            for artifact in entry_artifacts(e):   # the primary and its range models
+                try:
+                    undeclared = pickle_modules(candidate_dir / artifact) & set(UNDECLARED_PICKLE_MODULES)
+                    if undeclared:
+                        problems.append(f"{t} h={h}: {artifact} needs undeclared module(s) {sorted(undeclared)}; "
+                                        "re-save with hazecast.train.save_model")
+                        continue
+                    pred = float(joblib.load(candidate_dir / artifact).predict(row[cols])[0])
+                    if not np.isfinite(pred):
+                        problems.append(f"{t} h={h}: non-finite prediction from {artifact}")
+                except Exception as exc:  # noqa: BLE001 - any load/predict failure blocks promotion
+                    problems.append(f"{t} h={h}: {artifact}: {type(exc).__name__}: {exc}")
     if row is None:
         problems.append("no complete gold row to smoke-test predictions on")
     checks["integrity"] = dict(passed=not problems, problems=problems)
@@ -330,8 +352,8 @@ def promote(candidate_dir: Path, production_dir: Path = PRODUCTION_DIR,
     production_dir.mkdir(parents=True, exist_ok=True)
     for entries in manifest["models"].values():
         for e in entries.values():
-            if e.get("artifact"):
-                shutil.copyfile(candidate_dir / e["artifact"], production_dir / e["artifact"])
+            for artifact in entry_artifacts(e):
+                shutil.copyfile(candidate_dir / artifact, production_dir / artifact)
     archived = _archive_current(production_dir)
     for name in COMPANION_FILES:
         if (candidate_dir / name).exists():
@@ -353,8 +375,8 @@ def rollback(to: Path | None = None, production_dir: Path = PRODUCTION_DIR) -> d
     if target is None or not target.exists():
         raise FileNotFoundError("No archived manifest to roll back to")
     manifest = _load(target)
-    missing = [e["artifact"] for entries in manifest["models"].values() for e in entries.values()
-               if e.get("artifact") and not (production_dir / e["artifact"]).exists()]
+    missing = [a for entries in manifest["models"].values() for e in entries.values()
+               for a in entry_artifacts(e) if not (production_dir / a).exists()]
     if missing:
         raise FileNotFoundError(f"Cannot roll back: artifacts missing from {production_dir}: {missing[:3]}")
     archived = _archive_current(production_dir)
@@ -374,8 +396,8 @@ def shadow(candidate_dir: Path, shadow_dir: Path = SHADOW_DIR, production_dir: P
     (shadow_dir / MANIFEST).unlink(missing_ok=True)
     for entries in manifest["models"].values():
         for e in entries.values():
-            if e.get("artifact"):
-                shutil.copyfile(candidate_dir / e["artifact"], shadow_dir / e["artifact"])
+            for artifact in entry_artifacts(e):
+                shutil.copyfile(candidate_dir / artifact, shadow_dir / artifact)
     atomic_json(shadow_dir / MANIFEST, {**manifest, "shadow_from": str(candidate_dir), "shadow_started_at": _now()})
     _log(Path(production_dir), dict(action="shadow_started", candidate=str(candidate_dir), decided_at=_now()))
     return dict(shadow=str(shadow_dir), candidate=str(candidate_dir))

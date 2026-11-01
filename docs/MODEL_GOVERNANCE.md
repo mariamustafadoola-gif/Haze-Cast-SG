@@ -116,12 +116,15 @@ confirmed performance loss retrains automatically.
 
 During a long episode persistence is hard to beat a day ahead. Hence:
 
-**Decision for the team (recommended, not yet switched on):** for +12 h
-and +24 h, set `elevated_flag` when **either** the model or persistence
-is ≥ 56 µg/m³. On the 2024–26 holdout, +24 h recall goes 0.56 → 0.74 and
-false alarms 1.7 % → 2.0 % of non-haze hours. This changes the meaning of
-the public flag, so it needs the approver's sign-off (§7) before the
-inference code changes.
+**Alert rule (approved and switched on, 1 Nov 2026):** for +12 h and
++24 h, `elevated_flag` is set when **either** the model or persistence
+is ≥ 56 µg/m³ (`config.ALERT_PERSISTENCE_HORIZONS`, `inference.elevated`).
+On the 2024–26 holdout, +24 h recall goes 0.56 → 0.74 and false alarms
+1.7 % → 2.0 % of non-haze hours. It changes the meaning of the public flag:
+at +12/+24 h it now means "the model or current conditions point to haze",
+and the dashboard shows such a forecast as Elevated even when the model's
+number is below 56. The monitors still score the model's own forecasts
+(`forecast_pm25`), so model quality and drift are judged as before.
 
 Scheduled refresh: monthly (1st, 03:00), so new labels are absorbed even
 when nothing alerts. The 2026 haze season becomes a validation period

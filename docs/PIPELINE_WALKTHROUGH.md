@@ -68,7 +68,7 @@ task run without rebuilding. Rebuild only when the requirements change.
 ### 1.2 First-time setup
 
 ```bash
-git clone <repo> && cd hazecast-sg && git checkout e2e-pipeline
+git clone <repo> && cd hazecast-sg && git checkout e2e-pipeline-xgb-multiq   # the main line since 1 Nov
 git lfs pull                      # the committed raw-data seed (optional: the backfill DAG can fetch it all)
 cp .env.example .env
 ```
@@ -509,6 +509,88 @@ Verified in headless Chrome: with live data (rounded values, notice shown for a 
 
 The API container now mounts `serving/` and `src/` like the Airflow containers, so dashboard or API edits apply on restart without rebuilding the image.
 
+### 3.10 Three quantile models, one chosen per horizon (from `e2e-pipeline-xgb-multiq`; live since 1 Nov)
+
+> Built on `e2e-pipeline-xgb-multiq` (branched 31 Oct), chosen by the team on 1 Nov, merged into `e2e-pipeline-fire-fallback` and promoted the same day. Before that, production used a flat 0.85. Since then the team works on `e2e-pipeline-xgb-multiq` itself (the main line); `e2e-pipeline-fire-fallback` is frozen.
+
+**Why.** Rechecked on the corrected fire features (`experiments/quantile_recheck_new_fire.py`,
+`reports/model_comparison/quantile_recheck_*.csv`), the flat 0.85 falls behind persistence at
++12 h and +24 h, and the per-cell table from `XGB_Tuned` did not reproduce (9 of 18 values; the
+F2 gap between a cell's best quantile and the next was a median 0.02). Out of time (2024–26):
+
+| Quantile | Haze hours caught | False alarms (non-haze hours) | F2 |
+|---|---|---|---|
+| flat 0.85 (production) | 68% | 1.2% | 0.655 |
+| flat 0.90 | 76% | 1.7% | 0.688 |
+| flat 0.95 | 84% | 2.4% | 0.710 |
+
+**What it does.**
+- **Three models per group:** every region and horizon gets `xgboost_q85`, `xgboost_q90` and `xgboost_q95` (`config.XGB_QUANTILE_BAND`).
+- **One primary per horizon** (`hourly_model._choose_quantile`): it drives `forecast_pm25` and the alert, wherever the quantile family wins the six-candidate comparison.
+  - It is chosen on F2 pooled over the six targets, from the forward folds plus the 2015 and 2019 haze seasons held out in turn (`QUANTILE_SELECTION_HAZE_SEASONS`). The forward folds alone see too little haze, and 2015 is never a forward validation period.
+  - Per horizon, not per region, because the per-region values were noise.
+  - The live choice (the published manifest's `quantile_selection`, otherwise 0.85) is kept unless another wins in ≥ 90% of paired weekly bootstrap resamples, the same stability rule as model selection.
+- **The range is served:** inference stores all three values, sorted so they never cross (`pm25_q85/q90/q95`, nullable ledger columns). The dashboard shows them as a shaded range on the bar and as "range lo–hi" in the text.
+- **The gate handles the range models:** promote, shadow and rollback copy the range models; the integrity check smoke-tests each of them; the like-for-like refit uses each model's recorded quantile.
+
+**Result (31 Oct – 1 Nov 2026, Airflow image, staging `data/models/hourly_staging/multiq_check_20261101`):**
+
+| Horizon | Quantile chosen | Beat 0.85 in | Holdout F2: challenger / champion / persistence | Holdout MAE: challenger / champion |
+|---|---|---|---|---|
+| +6 h | 0.90 | 97% of resamples | 0.769 / 0.763 / 0.761 | 9.52 / 8.03 |
+| +12 h | 0.90 | 100% | 0.682 / 0.656 / 0.699 | 10.09 / 8.53 |
+| +24 h | 0.95 | 99.8% | 0.655 / 0.581 / 0.644 | 13.34 / 8.66 |
+
+F2 and MAE are means over the six targets (MAE in µg/m³). Gate (`reports/model_comparison/multiq_gate_check.json`): **passed.**
+- **Integrity:** all 18 primaries and 54 range models load and predict.
+- **Skill:** 18 of 18 groups within 0.10 F2 of persistence; 8 ahead.
+- **No regression, like-for-like:** F2 better than the champion in 13 of 18 groups. The largest gains are central +24 h (+0.19) and east +24 h (+0.11); the largest drop is north +6 h (−0.04). No severe drops, and no MAE above 2× the champion's.
+- **Recent window:** not judged (no haze hours in the last 90 days).
+
+The choice repeated across two full runs (the first stopped after the selection by a logging bug, since fixed). Compared with the flat 0.95 branch, it catches fewer haze hours at +6 h and +12 h (recheck: 85% against 89%, and 77% against 86%) with fewer false alarms there (1.1% against 1.9%, and 1.8% against 2.6% of non-haze hours). Its largest F2 drop against the champion is smaller (−0.04 against −0.06).
+
+**XGB_Tuned's dual bar, for comparison (reported, not used to choose).** Each retrain now
+records it for every range model (`hourly_model.dual_bar`, `config.DUAL_BAR_RATIO = 1.15`):
+haze-hour recall at least 1.15× persistence's **and** MAE on haze hours at most 1.15×
+persistence's, in both held-out seasons (2015, 2019) and on the final holdout. It is stored per
+group (`dual_bar` in each manifest entry) and as counts per horizon
+(`quantile_selection[h]["dual_bar"]`). From the recheck data (groups passing, of 18):
+
+| Option | Both haze seasons (2015 and 2019) | Final holdout (2024–26) |
+|---|---|---|
+| flat 0.85 (production) | 4 | 3 |
+| flat 0.90 | 11 | 5 |
+| per-cell table (`XGB_Tuned`) | — | 7 |
+| **per-horizon choice (this branch: 0.90 / 0.90 / 0.95)** | **15** | **7** |
+| flat 0.95 | 16 | 10 |
+
+By the teammate's own measure, the per-horizon choice matches the per-cell table on the holdout
+and flat 0.95 passes most often, which is the trade-off against flat 0.95's higher false-alarm
+rate at +6/+12 h.
+
+**Monitoring dashboard: forecast against actual for every region and horizon.** The chart
+(`hazecast.dashboard.forecast_vs_actual`) has a menu for all 18 region × horizon combinations and
+zoom buttons (2 weeks / 3 months / all). It draws two layers, kept visibly apart:
+- **Replay (dotted, faded):** the latest year of the holdout replay (`data/monitoring/backtest.sqlite`,
+  rebuilt by every retrain), from a model trained only on data before the holdout. It gives the
+  continuous history, including the 2026 haze. Display only: it is never written to the live
+  ledger, so the monitors, the recent-window gate check and the early-life check judge live
+  forecasts alone. The production model is not used to fill gaps, because it was trained on those hours.
+- **Live (solid, a dot per hour):** forecasts actually issued, with persistence and the 0.85–0.95
+  range. Hours the pipeline did not forecast (stack down, stale data) are gaps; the dots keep
+  isolated hours visible. A dashed line marks the go-live date.
+
+Added 1 Nov after the live chart looked disjointed: from 26 Oct to 1 Nov only 40 of ~170 hours had
+a forecast (the laptop was off or asleep for most of the rest; 22 runs were skipped by the
+freshness gate). Continuous live history needs an always-on host. The holdout replay
+(`monitor_backtest`) now refits the range models too and applies the alert rule to its flags, so
+the replay dashboard shows the range over the 2026 haze. Replay of this branch's models
+(118 weekly windows): 106 no action, 2 investigate, 10 retrain, all retrains in the 2026 haze.
+
+**Promotion (1 Nov 2026).** Promoted through the gate after the merge. The re-check compared it with that morning's freshly retrained 0.85 champion: integrity passed, all 18 groups within 0.10 F2 of persistence (9 ahead), F2 better than the champion in 13 of 18 groups with no severe drops, recent window not judged. No shadow run: with the haze season over it would have shown little, and the 7-day early-life check and `governance rollback` cover the risk. The first live run served 0.90 / 0.90 / 0.95 with the range on all 18 forecasts.
+
+**Alert rule.** The model-or-persistence rule at +12/+24 h (switched on 1 Nov 2026, §4.5) applies on top: the flag is raised when the primary forecast or the current reading reaches 56.
+
 ---
 
 ## 4. Orchestration and monitoring
@@ -695,16 +777,19 @@ the episode (`experiments/monitoring_evidence.py`).
 - **Yes, for calibration:** false alarms fell from 19 % to 15 % at +6 h and from **36 % to 12 % at +24 h**, MAE dropped (29.8 → 24.9 at +24 h), and +6 h recall held (0.84 → 0.83).
 - **No, for +24 h recall:** 0.53 after retraining vs **0.69 for persistence**. This isn't staleness. Persistence is very hard to beat a day ahead once a long episode is underway.
 
-**Recommended additional intervention (needs team sign-off):** for +12 h
+**Additional intervention (approved, switched on 1 Nov 2026):** for +12 h
 and +24 h, raise the `elevated_flag` when **either** the model or
 persistence crosses 56. On the whole holdout this lifts +24 h recall
 from **0.56 to 0.74** (+12 h: 0.70 → 0.77), while false alarms move only
 from 1.7 % to 2.0 % of non-haze hours. Inside a haze episode the cost is
 higher (non-haze-hour false alarms 36 % → 45 %, mostly hours just below 56),
 which is acceptable for the stated user, for whom a false alarm means a
-precaution. It is not switched on in code, because it changes what the
-public-facing flag means. That is a product decision for the team (see
-`MODEL_GOVERNANCE.md` §5).
+precaution. Because it changes what the public flag means, it waited for
+the team's sign-off (`MODEL_GOVERNANCE.md` §5). It is implemented in
+`inference.elevated` (`config.ALERT_PERSISTENCE_HORIZONS = (12, 24)`); the
+monitors keep scoring the model's own `forecast_pm25`, and the dashboard
+shows a flagged forecast as Elevated even below 56, with a note that PM2.5
+is elevated now.
 
 ### 4.6 Reproducing the evidence
 

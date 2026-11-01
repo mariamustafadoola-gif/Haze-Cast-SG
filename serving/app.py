@@ -102,6 +102,9 @@ def get_model():
     """Which model serves each region x horizon, and when it was published."""
     m = _read_json(MODELS_DIR / "hourly" / "model_manifest.json", "No hourly model published yet")
     return {"published_at": m.get("published_at"), "trained_at": m.get("trained_at"),
+            # the quantile that drives the alert at each horizon; the range is served alongside
+            "quantile_per_horizon": {h: v.get("chosen") for h, v in (m.get("quantile_selection") or {}).items()},
+            "range_models": m.get("quantile_band", []),
             "models": {h: {t: {"model": e["model"], "training_end": e.get("training_end"),
                                "holdout_mae": (e.get("final_test") or {}).get("mae"),
                                "holdout_f2": (e.get("final_test") or {}).get("f2")}

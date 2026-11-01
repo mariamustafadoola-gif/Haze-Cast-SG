@@ -11,9 +11,9 @@ import logging
 import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from hazecast.config import GOLD_DIR, MODELS_DIR, DATA_DIR
+from hazecast.config import GOLD_DIR, MODELS_DIR, DATA_DIR, ALERT_PERSISTENCE_HORIZONS
 from hazecast.pipeline_store import (
-    TARGETS, HORIZONS, connect, timestamp, iso, finite, atomic_json,
+    TARGETS, HORIZONS, BAND_COLUMNS, connect, timestamp, iso, finite, atomic_json,
 )
 
 log = logging.getLogger(__name__)
@@ -87,27 +87,51 @@ def predict_final(gold_path, models_dir, *, max_feature_age_hours=2, now=None):
                 raise ValueError("Hourly model provenance missing training_label_end; retrain with the hourly pipeline")
             if timestamp(entry["training_label_end"]) > now:
                 raise ValueError("Model training labels extend past inference issue time")
-            if entry["model"] == "persistence":
-                prediction = float(row[f"now_{target}"].iloc[0])
-            else:
-                artifact = entry.get("artifact")
+            def _predict_artifact(artifact):
                 if not artifact or Path(artifact).name != artifact:
                     raise ValueError("Invalid model artifact path")
-                model = joblib.load(models_dir / artifact)
-                prediction = float(model.predict(row[cols])[0])
+                value = float(joblib.load(models_dir / artifact).predict(row[cols])[0])
+                if not math.isfinite(value):
+                    raise ValueError("Nonfinite prediction")
+                return max(0.0, value)
+
+            band = _band(entry, _predict_artifact)
+            if entry["model"] in band:
+                prediction = band[entry["model"]]   # the primary is a range member: keep it inside the range
+            elif entry["model"] == "persistence":
+                prediction = float(row[f"now_{target}"].iloc[0])
+            else:
+                prediction = _predict_artifact(entry.get("artifact"))
             if not math.isfinite(prediction):
                 raise ValueError("Nonfinite prediction")
             prediction = max(0.0, prediction)
+            persistence = float(row[f"now_{target}"].iloc[0])
             key = f"{iso(origin)}|{target}|{horizon}"
             records.append(dict(forecast_id=hashlib.sha256(key.encode()).hexdigest(),
                 issued_at=iso(now), as_of_time=iso(origin), forecast_time=iso(forecast_time),
                 region=target, horizon_hours=horizon, model=entry["model"],
                 model_run_id=entry.get("run_id"), manifest_sha256=digest,
                 forecast_pm25=prediction, threshold=threshold,
-                elevated_flag=int(prediction >= threshold), feature_age_hours=age,
-                persistence_pm25=float(row[f"now_{target}"].iloc[0]),
-                fire_carried_hours=fire_carried))
+                elevated_flag=int(elevated(prediction, persistence, horizon, threshold)),
+                feature_age_hours=age, persistence_pm25=persistence,
+                fire_carried_hours=fire_carried,
+                **{col: band.get(name) for name, col in BAND_COLUMNS.items()}))
     return records
+
+
+def elevated(prediction, persistence, horizon, threshold):
+    """The public flag: the model's forecast reaches the threshold or, at the
+    ALERT_PERSISTENCE_HORIZONS, the current reading already does."""
+    return prediction >= threshold or (horizon in ALERT_PERSISTENCE_HORIZONS and persistence >= threshold)
+
+
+def _band(entry, predict):
+    """{model name: forecast} for the entry's range models, sorted so that a higher quantile is
+    never below a lower one (separately trained quantile models can occasionally cross).
+    Empty for manifests trained before the range existed."""
+    names = sorted((n for n in (entry.get("band") or {}) if n in BAND_COLUMNS), key=lambda n: BAND_COLUMNS[n])
+    values = sorted(predict(entry["band"][n]) for n in names)
+    return dict(zip(names, values))
 
 
 def archive_forecasts(records, db_path, *, latest_path=None):

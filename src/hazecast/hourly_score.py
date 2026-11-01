@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from hazecast.config import GOLD_DIR, MODELS_DIR, SG_REGIONS
 from hazecast.hourly_model import _prepare
+from hazecast.inference import elevated
 
 log = logging.getLogger(__name__)
 TARGETS = SG_REGIONS + ["national"]
@@ -71,7 +72,8 @@ def score_latest_hourly(gold_path=GOLD_DIR / "hourly_features.parquet",
             results.append(dict(scored_at=scored_at.isoformat(),
                 as_of_time=origin.isoformat(), forecast_time=forecast_time.isoformat(),
                 horizon_hours=int(horizon), region=target, model=name,
-                forecast_pm25=round(pred, 1), elevated_flag=bool(pred >= threshold),
+                forecast_pm25=round(pred, 1),
+                elevated_flag=bool(elevated(pred, float(row[f"now_{target}"].iloc[0]), int(horizon), threshold)),
                 feature_age_hours=round(age_hours, 2)))
     frame = pd.DataFrame(results)
     if len(frame) != 18 or frame.duplicated(["region", "horizon_hours"]).any():

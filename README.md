@@ -56,7 +56,7 @@ Official readings describe the air **as it is now**. Outdoor operations teams (e
 | **Location-aware** | **Use my location** selects the nearest region. Location is processed on the device only |
 | **Sensitive groups mode** | Stricter thresholds for **children, the elderly and asthmatic patients** |
 | **Best time to go out** | Compares all four time slots for the user's region and recommends the cleanest |
-| **Forecast confidence** | Shows tested accuracy for the selected horizon and the result of the latest model health check |
+| **Forecast confidence** | Shows the likely range for your region, tested accuracy for the selected horizon, and the latest model health check |
 | **Late-data handling** | If a source is delayed, forecasts whose target time has passed are greyed out and the delayed source is named |
 | **Offline demo** | A real snapshot (16 Oct 2026, 11 pm) is embedded, so the app works with no server or internet |
 
@@ -112,7 +112,7 @@ flowchart TB
 | **Silver** | All sources aligned to one hourly Singapore-time grid, with short gaps filled and flagged |
 | **Gold** | Model features: recent PM2.5, rolling fire counts, rainfall, and wind alignment with each fire region |
 
-One model is trained per **region and horizon** (18 in total). Candidates are compared by forward validation, prioritising **F2 on elevated hours** (recall weighted above precision), because a missed haze hour costs more than a false alarm. The production model is **XGBoost with a quantile (85th percentile) objective**, which deliberately forecasts on the cautious side.
+One model is trained per **region and horizon** (18 in total). Candidates are compared by forward validation, prioritising **F2 on elevated hours** (recall weighted above precision), because a missed haze hour costs more than a false alarm. Each region and horizon gets **three XGBoost quantile models (85th, 90th and 95th percentile)**. Together they give a **likely range**, and one of them, chosen per horizon, is the headline forecast that drives the advice. Quantile models deliberately forecast on the cautious side.
 
 ---
 
@@ -314,7 +314,7 @@ A challenger is promoted only if it passes **integrity checks**, detects elevate
 
 ## Limitations and next steps
 
-- **Longer horizons are harder.** At +24 hours, a simple persistence forecast ("the level will stay the same") currently detects more elevated hours than the model during long episodes. The [governance document](docs/MODEL_GOVERNANCE.md) proposes combining the two for +12 h and +24 h warnings.
+- **Longer horizons are harder.** At +24 hours, a simple persistence forecast ("the level will stay the same") detects many elevated hours during long episodes. HazeCast therefore flags a +12 h or +24 h forecast as elevated when **either** the model **or** the current reading is at or above 56 µg/m³ (see [Model governance](docs/MODEL_GOVERNANCE.md)). Improving the model's own skill further ahead remains the next step.
 - **Wind is measured at Singapore only.** Smoke transport along the full path from the fire regions is not modelled.
 - **Hosting.** The system currently runs locally with Docker. A cloud deployment would make the live app publicly available.
 - **Alerts.** Push or email notifications when a region is forecast to turn red would increase practical value.
