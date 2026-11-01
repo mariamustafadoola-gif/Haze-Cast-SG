@@ -72,7 +72,7 @@ From top to bottom:
 | **6** | **Summary card** | A one-line headline for the whole island, plus the advice and PM2.5 value for your region |
 | **7** | **Best time to go out** | Your region at four times, with the best one outlined |
 | **8** | **How sure are we?** | How accurate this forecast has been, and the model's health check |
-| **9** | **Live / Demo / Refresh** (bottom) | Switch data source by hand, or fetch the latest numbers |
+| **9** | **Live / Demo / Refresh** (bottom) | Switch data source by hand, or reload the latest numbers |
 
 On a laptop, parts 7 and 8 sit in a second column on the right.
 
@@ -166,7 +166,8 @@ This card reports how reliable the selected forecast has been, so users can judg
 
 | Message | What it means | What to do |
 |---|---|---|
-| *"Demo: saved data from 16 Oct, 11 pm."* | The app is showing the saved demo, either because you chose **Demo** or because the server could not be reached | Tap **Live** at the bottom. If it stays on Demo, start the server (see the [README](../README.md#getting-started)) |
+| *"Demo: saved data from 16 Oct, 11 pm."* | You chose **Demo** at the bottom | Tap **Live** to switch back |
+| *"Live data isn't available yet, so this is saved demo data..."* | The server has no forecast yet (for example, before the first training run) or could not be reached | Start the server and complete the first training run (see the [README](../README.md#getting-started)). **Refresh** shows **"Live not ready"** until a forecast exists |
 | *"These forecasts were made from data N hours old. No new forecast until fresh data arrives (waiting for ...)"* | A data source is late. The app names which one | Wait for the next hourly run. The app keeps checking every minute |
 | *"N of 3 target times have passed and are greyed out."* | Some forecast times are already in the past | Greyed slots and crossed-out numbers are **no longer forecasts**. Use the ones still ahead |
 | *"Satellite fire data is N hours late, so this forecast uses the last fire counts received."* | NASA's fire data hasn't arrived yet | Nothing. The forecast still works, using the last fire counts |
