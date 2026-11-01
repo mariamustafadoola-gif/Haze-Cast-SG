@@ -143,7 +143,8 @@ def dashboards() -> dict:
     from hazecast.dashboard import build_dashboard
     out = {}
     if LEDGER.exists():
-        out["live"] = str(build_dashboard(LEDGER))
+        # the holdout replay (rebuilt at every retrain) is drawn under the live forecasts, for context
+        out["live"] = str(build_dashboard(LEDGER, replay_path=LEDGER.parent / "backtest.sqlite"))
     return out
 
 

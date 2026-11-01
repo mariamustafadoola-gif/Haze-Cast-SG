@@ -5,8 +5,8 @@ monitor_runs tables hazecast.model_monitor writes) and plots every monitor
 over time:
 
   1. governance decision per monitoring window
-  2. forecast vs actual for any region and horizon (last FORECAST_CHART_DAYS days), with
-     persistence and, where served, the 0.85-0.95 quantile range
+  2. forecast vs actual for any region and horizon: live forecasts (with persistence and the
+     0.85-0.95 range) over the holdout replay, which is drawn for context and never monitored
   3. model quality: MAE and skill vs persistence per horizon, F2 on elevated hours
   4. stability: CSI of each feature and PSI of each model's forecasts against the same
      monsoon season in the training years, as a share of their calibrated limits, and the
@@ -46,8 +46,37 @@ STATUS = {"none": ("#0ca30c", "No action"), "investigate": ("#fab219", "Investig
           "retrain": ("#ec835a", "Retrain"), "fix_data": ("#d03b3b", "Fix data")}
 INK, INK_2, GRID, SURFACE = "#0b0b0b", "#52514e", "#e6e5e1", "#fcfcfb"
 FORECAST_CHART_DAYS = 90       # the forecast-vs-actual chart shows the latest 90 days of the ledger
+REPLAY_CHART_DAYS = 365        # with the holdout replay underneath: the latest year (covers a full haze season)
 BAND_LOW, BAND_HIGH = "pm25_q85", "pm25_q95"
 SEQUENTIAL = ["#fcfcfb", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
+
+
+def _series(db, tables) -> pd.DataFrame:
+    """Forecasts joined with their actual readings."""
+    if "forecasts" not in tables:
+        return pd.DataFrame()
+    have = {r[1] for r in db.execute("PRAGMA table_info(forecasts)")}
+    band = "".join(f", f.{c}" for c in (BAND_LOW, BAND_HIGH) if c in have)   # ledgers before the range lack them
+    return pd.read_sql(f"""
+        SELECT f.forecast_time, f.region, f.horizon_hours, f.forecast_pm25, f.persistence_pm25,
+               f.elevated_flag{band}, a.actual_pm25 FROM forecasts f
+        LEFT JOIN actuals a ON f.forecast_time = a.observation_time AND f.region = a.region
+        ORDER BY f.forecast_time""", db)
+
+
+def _read_replay(path) -> pd.DataFrame:
+    """Forecasts from a holdout replay ledger (monitor_backtest): display only, never monitored."""
+    if not path or not Path(path).exists():
+        return pd.DataFrame()
+    db = sqlite3.connect(path)
+    try:
+        tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        replay = _series(db, tables)
+    finally:
+        db.close()
+    if not replay.empty:
+        replay["forecast_time"] = pd.to_datetime(replay.forecast_time, utc=True).dt.tz_convert("Asia/Singapore")
+    return replay
 
 
 def _read(db_path: Path):
@@ -56,15 +85,7 @@ def _read(db_path: Path):
         tables = {r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         metrics = pd.read_sql("SELECT * FROM monitor_metrics", db) if "monitor_metrics" in tables else pd.DataFrame()
         runs = pd.read_sql("SELECT * FROM monitor_runs", db) if "monitor_runs" in tables else pd.DataFrame()
-        series = pd.DataFrame()
-        if "forecasts" in tables:
-            have = {r[1] for r in db.execute("PRAGMA table_info(forecasts)")}
-            band = "".join(f", f.{c}" for c in (BAND_LOW, BAND_HIGH) if c in have)   # ledgers before the range lack them
-            series = pd.read_sql(f"""
-                SELECT f.forecast_time, f.region, f.horizon_hours, f.forecast_pm25, f.persistence_pm25,
-                       f.elevated_flag{band}, a.actual_pm25 FROM forecasts f
-                LEFT JOIN actuals a ON f.forecast_time = a.observation_time AND f.region = a.region
-                ORDER BY f.forecast_time""", db)
+        series = _series(db, tables)
     finally:
         db.close()
     for frame, col in ((metrics, "window_end"), (runs, "window_end"), (series, "forecast_time")):
@@ -93,6 +114,8 @@ def _line(fig, x, y, name, color, dash=None, markers=False, hover_fmt=".2f"):
 
 
 def _metric(metrics: pd.DataFrame, monitor: str, metric: str) -> pd.DataFrame:
+    if metrics.empty:   # forecasts archived but no monitoring run yet (a new deployment)
+        return metrics
     return metrics.loc[(metrics.monitor == monitor) & (metrics.metric == metric)]
 
 
@@ -114,58 +137,96 @@ def _season_bands(fig, dates: pd.Series) -> None:
                                font=dict(size=10, color=INK_2))
 
 
-def forecast_vs_actual(series: pd.DataFrame):
-    """Forecast, actual and persistence for one region and horizon at a time (a menu picks which),
-    over the latest FORECAST_CHART_DAYS days, with the 0.85-0.95 range shaded where it was served."""
+def _hourly(g: pd.DataFrame) -> pd.DataFrame:
+    """One row per hour on a full clock (hours with no forecast become gaps), rounded to what the chart shows."""
+    g = g.set_index("forecast_time").sort_index()
+    g = g[~g.index.duplicated()].asfreq("h").reset_index()
+    num = g.select_dtypes("number").columns
+    g[num] = g[num].round(1)   # the chart shows 0.1 µg/m³; full precision only bloats the page
+    g["forecast_time"] = g.forecast_time.dt.tz_localize(None)   # Singapore time; shorter labels in the page
+    return g
+
+
+def forecast_vs_actual(series: pd.DataFrame, replay: pd.DataFrame | None = None):
+    """Forecast against actual for one region and horizon at a time (a menu picks which).
+
+    Live forecasts (the ledger) are solid, with a dot per hour so isolated hours show, the
+    0.85-0.95 range shaded and persistence dotted; hours the pipeline did not forecast are gaps.
+    With a holdout replay underneath (monitor_backtest's ledger), the latest REPLAY_CHART_DAYS of
+    replayed forecasts are drawn dotted and faded: a model trained only on data before the
+    holdout, for context. The replay is display only; the monitors judge live forecasts alone.
+    """
     import plotly.graph_objects as go
-    recent = series.loc[series.forecast_time >= series.forecast_time.max() - pd.Timedelta(days=FORECAST_CHART_DAYS)]
-    targets = ["national"] + [t for t in SG_REGIONS]
+    replay = replay if replay is not None else pd.DataFrame()
+    ends = [f.forecast_time.max() for f in (series, replay) if not f.empty]
+    days = REPLAY_CHART_DAYS if not replay.empty else FORECAST_CHART_DAYS
+    start = max(ends) - pd.Timedelta(days=days)
+    live = series.loc[series.forecast_time >= start] if not series.empty else series
+    rep = replay.loc[replay.forecast_time >= start] if not replay.empty else replay
+    horizons = sorted({int(h) for f in (live, rep) if not f.empty for h in f.horizon_hours.unique()})
     fig, groups = go.Figure(), []
-    for t in targets:
-        for h in sorted(recent.horizon_hours.unique()):
-            g = recent.loc[(recent.region == t) & (recent.horizon_hours == h)]
-            if g.empty:
+    for t in ["national"] + list(SG_REGIONS):
+        for h in horizons:
+            g = live.loc[(live.region == t) & (live.horizon_hours == h)] if not live.empty else live
+            r = rep.loc[(rep.region == t) & (rep.horizon_hours == h)] if not rep.empty else rep
+            if g.empty and r.empty:
                 continue
-            # On a full hourly clock, so hours with no forecast (pipeline paused) show as gaps.
-            g = g.set_index("forecast_time").sort_index()
-            g = g[~g.index.duplicated()].asfreq("h").reset_index()
-            num = g.select_dtypes("number").columns
-            g[num] = g[num].round(1)   # the chart shows 0.1 µg/m³; full precision only bloats the page
-            g["forecast_time"] = g.forecast_time.dt.tz_localize(None)   # Singapore time; shorter labels in the page
-            first, label = len(fig.data), f"{t.title()} · +{int(h)} h"
+            first, label = len(fig.data), f"{t.title()} · +{h} h"
             show = not groups   # the first group is visible; the menu switches the rest
-            if BAND_LOW in g and g[BAND_LOW].notna().any():
-                fig.add_trace(go.Scatter(x=g.forecast_time, y=g[BAND_LOW], mode="lines", line=dict(width=0),
-                                         hoverinfo="skip", showlegend=False, visible=show))
-                fig.add_trace(go.Scatter(x=g.forecast_time, y=g[BAND_HIGH], mode="lines", line=dict(width=0),
-                                         fill="tonexty", fillcolor="rgba(235,104,52,0.32)", name="Range (0.85–0.95)",
-                                         customdata=g[BAND_LOW], visible=show,
-                                         hovertemplate="Range: %{customdata:.1f}–%{y:.1f}<extra></extra>"))
-            for y, name, color, dash in ((g.actual_pm25, "Actual", SERIES[0], None),
-                                         (g.forecast_pm25, "Forecast", SERIES[1], None),
-                                         (g.persistence_pm25, "Persistence (same as now)", INK_2, "dot")):
-                fig.add_trace(go.Scatter(x=g.forecast_time, y=y, name=name, mode="lines", visible=show,
-                                         line=dict(color=color, width=1.5, dash=dash),
-                                         hovertemplate=f"{name}: %{{y:.1f}}<extra></extra>"))
+            if not r.empty:
+                r = _hourly(r)
+                fig.add_trace(go.Scatter(x=r.forecast_time, y=r.actual_pm25, name="Actual", mode="lines", visible=show,
+                                         line=dict(color=SERIES[0], width=1.3),
+                                         hovertemplate="Actual: %{y:.1f}<extra></extra>"))
+                fig.add_trace(go.Scatter(x=r.forecast_time, y=r.forecast_pm25, name="Replay (model trained before the holdout)",
+                                         mode="lines", visible=show, opacity=0.6, line=dict(color=SERIES[1], width=1.2, dash="dot"),
+                                         hovertemplate="Replay: %{y:.1f}<extra></extra>"))
+            if not g.empty:
+                g = _hourly(g)
+                if BAND_LOW in g and g[BAND_LOW].notna().any():
+                    fig.add_trace(go.Scatter(x=g.forecast_time, y=g[BAND_LOW], mode="lines", line=dict(width=0),
+                                             hoverinfo="skip", showlegend=False, visible=show))
+                    fig.add_trace(go.Scatter(x=g.forecast_time, y=g[BAND_HIGH], mode="lines", line=dict(width=0),
+                                             fill="tonexty", fillcolor="rgba(235,104,52,0.32)", name="Range (0.85–0.95)",
+                                             customdata=g[BAND_LOW], visible=show,
+                                             hovertemplate="Range: %{customdata:.1f}–%{y:.1f}<extra></extra>"))
+                lines = [(g.forecast_pm25, "Live forecast", SERIES[1], None, True),
+                         (g.persistence_pm25, "Persistence (same as now)", INK_2, "dot", False)]
+                if r.empty:   # no replay: the live ledger carries the actual readings too
+                    lines.insert(0, (g.actual_pm25, "Actual", SERIES[0], None, False))
+                for y, name, color, dash, dots in lines:
+                    fig.add_trace(go.Scatter(x=g.forecast_time, y=y, name=name, mode="lines+markers" if dots else "lines",
+                                             visible=show, marker=dict(size=4, color=color),
+                                             line=dict(color=color, width=1.8 if dots else 1.3, dash=dash),
+                                             hovertemplate=f"{name}: %{{y:.1f}}<extra></extra>"))
             groups.append((label, first, len(fig.data)))
     n = len(fig.data)
+    span = f"latest {days} days"
     buttons = [dict(label=label, method="update",
-                    args=[{"visible": [a <= i < b for i in range(n)]},
-                          {"title.text": f"Forecast vs actual: {label} (latest {FORECAST_CHART_DAYS} days)"}])
+                    args=[{"visible": [a <= i < b for i in range(n)]}, {"title.text": f"Forecast vs actual: {label} ({span})"}])
                for label, a, b in groups]
     fig.add_hline(y=PM25_ELEVATED_THRESHOLD, line=dict(color=INK_2, width=1, dash="dash"),
                   annotation_text=f"Elevated ({PM25_ELEVATED_THRESHOLD:g} µg/m³)", annotation_position="top left")
-    title = f"Forecast vs actual: {groups[0][0]} (latest {FORECAST_CHART_DAYS} days)" if groups else "Forecast vs actual"
-    return _layout(fig, title, "PM2.5 (µg/m³)", height=440,
-                   margin=dict(l=60, r=20, t=96, b=40),
-                   legend=dict(orientation="h", yanchor="bottom", y=1.02, x=1, xanchor="right", bgcolor="rgba(0,0,0,0)",
+    if not replay.empty and not series.empty:
+        go_live = series.forecast_time.min().tz_localize(None)
+        fig.add_vline(x=go_live, line=dict(color=INK_2, width=1, dash="dash"))   # grey reads on light and dark
+        fig.add_annotation(x=go_live, y=0.97, yref="paper", text=f"live since {go_live:%d %b} ", showarrow=False,
+                           xanchor="right", yanchor="top", font=dict(size=11, color=INK_2))
+    fig.update_xaxes(rangeselector=dict(buttons=[dict(count=14, label="2 weeks", step="day", stepmode="backward"),
+                                                 dict(count=3, label="3 months", step="month", stepmode="backward"),
+                                                 dict(step="all", label="all")],
+                                        x=0.2, xanchor="left", y=1.03, yanchor="bottom", font=dict(size=11)))
+    title = f"Forecast vs actual: {groups[0][0]} ({span})" if groups else "Forecast vs actual"
+    return _layout(fig, title, "PM2.5 (µg/m³)", height=500,
+                   margin=dict(l=60, r=20, t=100, b=90),
+                   legend=dict(orientation="h", yanchor="top", y=-0.12, x=0, xanchor="left", bgcolor="rgba(0,0,0,0)",
                                traceorder="normal"),
                    updatemenus=[dict(type="dropdown", buttons=buttons, active=0, x=0, xanchor="left", y=1.03,
                                      yanchor="bottom", showactive=True, bgcolor=SURFACE, bordercolor=GRID,
                                      font=dict(color=INK))])
 
 
-def figures(metrics: pd.DataFrame, runs: pd.DataFrame, series: pd.DataFrame) -> list:
+def figures(metrics: pd.DataFrame, runs: pd.DataFrame, series: pd.DataFrame, replay: pd.DataFrame | None = None) -> list:
     import plotly.graph_objects as go
     figs = []
 
@@ -183,8 +244,8 @@ def figures(metrics: pd.DataFrame, runs: pd.DataFrame, series: pd.DataFrame) -> 
                             yaxis=dict(categoryorder="array", categoryarray=[v[1] for v in STATUS.values()]),
                             hovermode="closest"))
 
-    if not series.empty:
-        figs.append(forecast_vs_actual(series))
+    if not series.empty or (replay is not None and not replay.empty):
+        figs.append(forecast_vs_actual(series, replay))
 
     q = _metric(metrics, "model_quality", "mae")
     if not q.empty:
@@ -265,7 +326,7 @@ def figures(metrics: pd.DataFrame, runs: pd.DataFrame, series: pd.DataFrame) -> 
         figs.append(_layout(fig, "Bias: gap between best and worst region's elevated-hour recall", "Recall gap",
                             yaxis_tickformat=".0%"))
     me = _metric(metrics, "bias_drift", "mean_error")
-    me = me.loc[me.horizon_hours == 6]
+    me = me.loc[me.horizon_hours == 6] if not me.empty else me
     if not me.empty:
         fig = go.Figure()
         for region in SG_REGIONS:
@@ -345,9 +406,11 @@ table{border-collapse:collapse;margin:8px 0} td,th{border-bottom:1px solid var(-
 
 
 def build_dashboard(db_path: Path = MONITORING_DIR / "pipeline.sqlite", out_path: Path = REPORTS_DIR / "dashboard.html",
-                    *, title: str = "HazeCast SG: model monitoring", subtitle: str = "") -> Path:
+                    *, title: str = "HazeCast SG: model monitoring", subtitle: str = "",
+                    replay_path: Path | None = None) -> Path:
+    """replay_path: a holdout replay ledger drawn under the live forecasts, for context (display only)."""
     metrics, runs, series = _read(Path(db_path))
-    figs = figures(metrics, runs, series)
+    figs = figures(metrics, runs, series, _read_replay(replay_path))
     parts = [f.to_html(full_html=False, include_plotlyjs=(i == 0), config={"displaylogo": False, "responsive": True})
              for i, f in enumerate(figs)]
     generated = datetime.now(timezone.utc).astimezone().strftime("%d %b %Y %H:%M %Z")
