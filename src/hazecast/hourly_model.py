@@ -25,7 +25,7 @@ from hazecast.config import (
     GOLD_DIR, MODELS_DIR, SG_REGIONS, HOURLY_HORIZONS, HOURLY_TIMEZONE,
     PM25_ELEVATED_THRESHOLD, MODEL_CANDIDATES, CV_SPLITS,
     FINAL_TEST_FRACTION, MIN_TRAIN_ROWS, HOURLY_MLFLOW_EXPERIMENT, REPO_ROOT,
-    XGB_QUANTILE_BAND, QUANTILE_SELECTION_HAZE_SEASONS,
+    XGB_QUANTILE_BAND, QUANTILE_SELECTION_HAZE_SEASONS, DUAL_BAR_RATIO,
 )
 from hazecast.train import (_make_model, _metrics, _json_safe, _log_selected_model, save_model,
                             quantile_name, quantile_alpha)
@@ -177,6 +177,19 @@ def _choose_quantile(y, dates, preds, incumbent):
                 chosen=chosen)
 
 
+def dual_bar(y, pred, persistence, threshold=PM25_ELEVATED_THRESHOLD, ratio=DUAL_BAR_RATIO):
+    """XGB_Tuned's dual bar on one period: haze-hour recall at least `ratio` x persistence's and
+    MAE on haze hours at most `ratio` x persistence's. None without haze hours. Reported only."""
+    y, pred, persistence = (np.asarray(a, dtype=float) for a in (y, pred, persistence))
+    haze = y >= threshold
+    if not haze.any():
+        return None
+    recall, p_recall = float((pred[haze] >= threshold).mean()), float((persistence[haze] >= threshold).mean())
+    mae, p_mae = float(np.abs(pred[haze] - y[haze]).mean()), float(np.abs(persistence[haze] - y[haze]).mean())
+    return dict(recall=recall, persistence_recall=p_recall, mae_haze=mae, persistence_mae_haze=p_mae,
+                n_haze=int(haze.sum()), passed=bool(recall >= ratio * p_recall and mae <= ratio * p_mae))
+
+
 def incumbent_quantiles(manifest_path):
     """{horizon: chosen band member} from a published manifest; empty if it has none."""
     try:
@@ -252,6 +265,7 @@ def _evaluate(gold, horizon, incumbent=QUANTILE_FAMILY):
         # band validation for the per-horizon quantile choice: forward folds plus haze seasons
         band_y, band_dates = list(pooled[BAND[0]][0]), list(pooled_dates)
         band_p = {n: list(pooled[n][1]) for n in BAND}
+        dual = {n: {} for n in BAND}
         for year, train, valid in _season_folds(rows, test_start, horizon):
             band_y.extend(valid[f"label_{target}"].tolist())
             band_dates.extend(valid.date.tolist())
@@ -260,6 +274,7 @@ def _evaluate(gold, horizon, incumbent=QUANTILE_FAMILY):
                 band_p[name].extend(pred.tolist())
                 results.append(dict(target=target, model=name, split=f"haze_season_{year}",
                                     **_metrics(valid[f"label_{target}"], pred)))
+                dual[name][str(year)] = dual_bar(valid[f"label_{target}"], pred, valid[f"now_{target}"])
         winner = min(MODEL_CANDIDATES, key=lambda n: (
             (-summaries[n]["f2"], summaries[n]["mae"], summaries[n]["rmse"])
             if has_haze else (summaries[n]["mae"], summaries[n]["rmse"])))
@@ -276,7 +291,7 @@ def _evaluate(gold, horizon, incumbent=QUANTILE_FAMILY):
         for name, metrics in summaries.items():
             results.append(dict(target=target, model=name, split="validation_pooled", **metrics))
         family[target] = dict(rows=rows, winner=winner, summaries=summaries, has_haze=has_haze,
-                              stability=stability, band=(band_y, band_dates, band_p))
+                              stability=stability, band=(band_y, band_dates, band_p), dual=dual)
     # One quantile per horizon, pooled over the targets.
     y, when, preds = [], [], {n: [] for n in BAND}
     for f in family.values():
@@ -300,6 +315,12 @@ def _evaluate(gold, horizon, incumbent=QUANTILE_FAMILY):
             pred = _predict(_fit(name, train, cols, target), test, cols, target)
             tested[name] = _metrics(test[f"label_{target}"], pred)
             results.append(dict(target=target, model=name, split="final_test", **tested[name]))
+            if name in BAND:
+                f["dual"][name]["holdout"] = dual_bar(test[f"label_{target}"], pred, test[f"now_{target}"])
+        for name in BAND:   # both seasons must pass, as in XGB_Tuned; None when a season had no haze
+            seasons = [v for k, v in f["dual"][name].items() if k != "holdout"]
+            f["dual"][name]["both_seasons"] = (all(v["passed"] for v in seasons)
+                                               if seasons and all(v is not None for v in seasons) else None)
         rule = "f2_then_mae_rmse" if f["has_haze"] else "mae_then_rmse_no_positive_support"
         if f["winner"] == QUANTILE_FAMILY:
             rule += "; quantile chosen per horizon"
@@ -307,7 +328,12 @@ def _evaluate(gold, horizon, incumbent=QUANTILE_FAMILY):
                                   family_winner=f["winner"], validation=f["summaries"][winner],
                                   final_test=tested[winner], band_final_test={n: tested[n] for n in BAND},
                                   selection_rule=rule, stability=f["stability"],
-                                  test_start=test_start.isoformat())
+                                  dual_bar=f["dual"], test_start=test_start.isoformat())
+    # Reported only: how many of the six targets clear the dual bar, per range model.
+    choice["dual_bar"] = {n: dict(
+        both_seasons=sum(bool(f["dual"][n].get("both_seasons")) for f in family.values()),
+        holdout=sum(bool((f["dual"][n].get("holdout") or {}).get("passed")) for f in family.values()),
+        of=len(family)) for n in BAND}
     summary = pd.DataFrame(results)
     summary["horizon_hours"] = horizon
     return summary, selections, cols, choice

@@ -240,6 +240,10 @@ XGB_QUANTILE_BAND = (0.85, 0.90, 0.95)
 # folds see too little haze to choose a quantile on their own: 2015 falls in the first training
 # block and is never validated on.
 QUANTILE_SELECTION_HAZE_SEASONS = (2015, 2019)
+# XGB_Tuned's dual bar, reported for every range model in the manifest and eval_summary.csv but
+# never used to choose: haze-hour recall >= DUAL_BAR_RATIO x persistence's AND MAE on haze hours
+# <= DUAL_BAR_RATIO x persistence's, in each held-out haze season and on the final holdout.
+DUAL_BAR_RATIO = 1.15
 
 
 # ---------------------------------------------------------------------------

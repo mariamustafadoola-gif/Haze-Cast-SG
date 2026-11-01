@@ -167,3 +167,14 @@ def test_every_range_model_can_be_logged_to_mlflow(monkeypatch):
     for name in BAND:
         _log_selected_model(_make_model(name), name)
     assert len(logged) == len(BAND)
+
+
+def test_dual_bar_matches_the_xgb_tuned_definition():
+    from hazecast.hourly_model import dual_bar
+    y = np.array([10, 60, 70, 80, 20.0])
+    pers = np.array([10, 30, 70, 40, 20.0])          # catches 1 of 3 haze hours
+    good = dual_bar(y, np.array([12, 62, 72, 78, 25.0]), pers)
+    assert good["passed"] and good["recall"] == 1.0 and abs(good["persistence_recall"] - 1 / 3) < 1e-9
+    worse = dual_bar(y, np.array([12, 30, 50, 40, 25.0]), pers)     # misses every haze hour
+    assert not worse["passed"]
+    assert dual_bar(np.array([10, 20.0]), np.array([10, 20.0]), np.array([10, 20.0])) is None

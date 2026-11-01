@@ -23,4 +23,7 @@ result = governance.check_candidate(out)
 manifest = json.loads((out / "model_manifest.json").read_text())
 print("QUANTILE PER HORIZON:", {h: (v["chosen"], v["proposed"], v["confidence"])
                                 for h, v in manifest["quantile_selection"].items()})
+print("DUAL BAR (targets passing, both seasons / holdout):",
+      {h: {n: f"{v['both_seasons']}/{v['holdout']} of {v['of']}" for n, v in c["dual_bar"].items()}
+       for h, c in manifest["quantile_selection"].items()})
 print("GATE:", result["passed"], {k: v["passed"] for k, v in result["checks"].items()})

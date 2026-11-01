@@ -549,6 +549,25 @@ F2 and MAE are means over the six targets (MAE in µg/m³). Gate (`reports/model
 
 The choice repeated across two full runs (the first stopped after the selection by a logging bug, since fixed). Compared with the flat 0.95 branch, it catches fewer haze hours at +6 h and +12 h (recheck: 85% against 89%, and 77% against 86%) with fewer false alarms there (1.1% against 1.9%, and 1.8% against 2.6% of non-haze hours). Its largest F2 drop against the champion is smaller (−0.04 against −0.06).
 
+**XGB_Tuned's dual bar, for comparison (reported, not used to choose).** Each retrain now
+records it for every range model (`hourly_model.dual_bar`, `config.DUAL_BAR_RATIO = 1.15`):
+haze-hour recall at least 1.15× persistence's **and** MAE on haze hours at most 1.15×
+persistence's, in both held-out seasons (2015, 2019) and on the final holdout. It is stored per
+group (`dual_bar` in each manifest entry) and as counts per horizon
+(`quantile_selection[h]["dual_bar"]`). From the recheck data (groups passing, of 18):
+
+| Option | Both haze seasons (2015 and 2019) | Final holdout (2024–26) |
+|---|---|---|
+| flat 0.85 (production) | 4 | 3 |
+| flat 0.90 | 11 | 5 |
+| per-cell table (`XGB_Tuned`) | — | 7 |
+| **per-horizon choice (this branch: 0.90 / 0.90 / 0.95)** | **15** | **7** |
+| flat 0.95 | 16 | 10 |
+
+By the teammate's own measure, the per-horizon choice matches the per-cell table on the holdout
+and flat 0.95 passes most often, which is the trade-off against flat 0.95's higher false-alarm
+rate at +6/+12 h.
+
 **Alert rule.** The model-or-persistence rule at +12/+24 h (switched on 1 Nov 2026, §4.5) applies on top: the flag is raised when the primary forecast or the current reading reaches 56.
 
 ---
