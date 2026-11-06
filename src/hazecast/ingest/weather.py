@@ -21,7 +21,6 @@ in this same file format. Hours that appear in more than one file are
 de-duplicated below, keeping the older file's value.
 """
 from __future__ import annotations
-import glob
 import logging
 import re
 from pathlib import Path
@@ -29,6 +28,7 @@ from pathlib import Path
 import pandas as pd
 
 from hazecast.config import RAW_DIR, BRONZE_DIR, WEATHER_POINTS
+from hazecast.ingest import raw_files
 
 log = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ def load_weather_bronze(raw_dir: Path = RAW_DIR / "weather") -> pd.DataFrame:
     Returns columns: ts (datetime, SGT), point, wind_speed_kmh,
     wind_dir_deg, rain_mm.
     """
-    files = sorted(glob.glob(str(raw_dir / "*.csv")))
+    files = raw_files(raw_dir / "*.csv")
     if not files:
         raise FileNotFoundError(
             f"No weather CSV found under {raw_dir}. Download Open-Meteo "

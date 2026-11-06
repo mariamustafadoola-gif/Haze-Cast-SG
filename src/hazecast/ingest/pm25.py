@@ -23,13 +23,13 @@ Known data quirks handled here (found by inspecting the actual file):
     then missing, which downstream code must tolerate.
 """
 from __future__ import annotations
-import glob
 import logging
 from pathlib import Path
 
 import pandas as pd
 
 from hazecast.config import RAW_DIR, BRONZE_DIR, SG_REGIONS
+from hazecast.ingest import raw_files
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def load_pm25_bronze(raw_dir: Path = RAW_DIR / "pm25") -> pd.DataFrame:
     Returns columns: ts (datetime, SGT, tz-naive), north, south, east,
     west, central (float, ug/m3).
     """
-    files = sorted(glob.glob(str(raw_dir / "*.csv")))
+    files = raw_files(raw_dir / "*.csv")
     if not files:
         raise FileNotFoundError(
             f"No PM2.5 CSV found under {raw_dir}. Download 'Historical 1-hr "
