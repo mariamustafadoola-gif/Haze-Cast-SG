@@ -158,7 +158,9 @@ git clone https://github.com/mariamustafadoola-gif/Haze-Cast-SG.git
 cd Haze-Cast-SG
 ```
 
-Without Git: on the GitHub page, click **Code**, then **Download ZIP**, unzip it, and open a terminal inside the unzipped folder. Step 5 downloads any data the ZIP leaves out.
+**From the submitted zip file:** unzip it and open a terminal inside the unzipped folder. The zip already contains the raw data (about 330 MB), so Step 5 only tops up the most recent days.
+
+**From GitHub without Git:** click **Code**, then **Download ZIP**. GitHub's ZIP leaves out the raw data (it holds small Git LFS placeholders instead). The pipeline skips the placeholders, and Step 5 then downloads the full history from the three public APIs, which takes longer.
 
 **Step 3. Add your key**
 
@@ -218,12 +220,27 @@ To let others open the live app on their phones, for example during a presentati
 | **API documentation** | <http://localhost:8000/docs> | Interactive OpenAPI documentation |
 | **Airflow** | <http://localhost:8080> | Pipeline scheduling and monitoring |
 | **MLflow** | <http://localhost:5000> | Experiment tracking and model comparison |
-| **JupyterLab** | <http://localhost:8888/lab> | Notebooks |
+| **JupyterLab** | <http://localhost:8888/lab> | Notebooks (start it first with `docker compose --profile dev up -d jupyter`) |
 
 > [!TIP]
 > Ports can be changed in `.env` (for example `API_PORT=8001`) if they clash with other software.
 
 To run individual pipeline stages in Python without Docker, see the [Technical guide](docs/TECHNICAL_GUIDE.md).
+
+### Run the tests
+
+The test suite (100+ tests) uses small synthetic data and mocked APIs, so it needs no key, no data and no internet. With Docker:
+
+```bash
+docker compose --profile dev run --rm jupyter python -m pytest -q
+```
+
+Or with a local Python 3.11:
+
+```bash
+pip install -r requirements.txt
+PYTHONPATH=src python -m pytest -q        # PowerShell: $env:PYTHONPATH="src"; python -m pytest -q
+```
 
 ---
 
@@ -285,13 +302,14 @@ A challenger is promoted only if it passes **integrity checks**, detects elevate
 ├── dags/                 Airflow DAGs (hourly, monitoring, haze monitoring, retrain, backfill)
 ├── data/                 Raw seed data (Git LFS) and generated layers (not committed)
 ├── docker/               Dockerfiles
-├── docs/                 Documentation, images, and the GitHub Pages copy of the app
+├── docs/                 Documentation, images, the GitHub Pages copy of the app; team notes in docs/team/
 ├── experiments/          Experiments supporting design decisions
-├── notebooks/            EDA, cleaning and feature selection, pipeline walkthrough
-├── reports/              Evaluation metrics and charts
+├── notebooks/            EDA, cleaning and feature selection, pipeline walkthrough, model diagnostics
+├── reports/              Evaluation metrics; charts in reports/figures/
 ├── serving/              FastAPI application and web app (static/index.html)
 ├── src/hazecast/         Core package: ingestion, transformation, training, inference, monitoring
 ├── tests/                pytest suite
+├── tools/                make_submission_zip.py: builds the clean zip for submission
 ├── docker-compose.yml    Full local stack
 └── requirements*.txt     Python dependencies
 ```
@@ -307,7 +325,7 @@ A challenger is promoted only if it passes **integrity checks**, detects elevate
 | [Pipeline walkthrough](docs/PIPELINE_WALKTHROUGH.md) | Engineers | The pipeline from ingestion to forecast, stage by stage |
 | [Model governance](docs/MODEL_GOVERNANCE.md) | Model and data owners | Monitoring thresholds, retraining rules and responsibilities |
 | [Data sources](data/README.md) | Data engineers | How each dataset is obtained, automatically or by hand |
-| [Team review guide](TEAM_REVIEW_GUIDE.md) | Contributors | Which files cover which part of the work |
+| [Team review guide](docs/team/TEAM_REVIEW_GUIDE.md) | Contributors | Which files cover which part of the work |
 | `notebooks/` | Everyone | Step-by-step data exploration, cleaning and feature selection |
 
 ---

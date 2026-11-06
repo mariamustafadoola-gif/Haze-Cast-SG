@@ -15,7 +15,6 @@ Writes:
 """
 from __future__ import annotations
 
-import glob
 import logging
 from pathlib import Path
 
@@ -25,6 +24,7 @@ from hazecast.config import (
     RAW_DIR, SILVER_DIR, REPO_ROOT, SG_REGIONS, FIRE_REGIONS, MAX_FILL_HOURS,
 )
 from hazecast.ingest.pm25 import _KNOWN_BAD_TIMESTAMP_FIX
+from hazecast.ingest import raw_files
 
 log = logging.getLogger(__name__)
 OUT_DIR = REPO_ROOT / "reports" / "data_quality"
@@ -35,7 +35,7 @@ _TS_PATTERN = r"^\d{1,2}/\d{1,2}/\d{4} \d{1,2}:\d{2}$"
 # Bronze: errors found in the raw files and how each was handled
 # ---------------------------------------------------------------------------
 def _pm25_fixes(raw_dir: Path) -> list[dict]:
-    frames = [pd.read_csv(f, dtype=str) for f in sorted(glob.glob(str(raw_dir / "*.csv")))]
+    frames = [pd.read_csv(f, dtype=str) for f in raw_files(raw_dir / "*.csv")]
     df = pd.concat([f.rename(columns={f.columns[0]: "ts"}) for f in frames], ignore_index=True)
     rows_in = len(df)
     known_bad = int(df["ts"].isin(_KNOWN_BAD_TIMESTAMP_FIX).sum())
@@ -64,9 +64,9 @@ def _firms_fixes(raw_dir: Path) -> list[dict]:
     cols = ["latitude", "longitude", "acq_date", "acq_time", "confidence"]
     # API archive files have no `type` column; treat them as vegetation fires (type 0), as the loader does
     arch = [pd.read_csv(f, dtype={"acq_time": str}).reindex(columns=cols + ["type"]).fillna({"type": 0})
-            for f in sorted(glob.glob(str(raw_dir / "fire_archive_*.csv")))]
+            for f in raw_files(raw_dir / "fire_archive_*.csv")]
     nrt = [pd.read_csv(f, usecols=cols, dtype={"acq_time": str})
-           for f in sorted(glob.glob(str(raw_dir / "fire_nrt_*.csv")))]
+           for f in raw_files(raw_dir / "fire_nrt_*.csv")]
     a = pd.concat(arch, ignore_index=True) if arch else pd.DataFrame(columns=cols + ["type"])
     n = pd.concat(nrt, ignore_index=True) if nrt else pd.DataFrame(columns=cols)
     rows_in = len(a) + len(n)
@@ -95,7 +95,7 @@ def _firms_fixes(raw_dir: Path) -> list[dict]:
 
 def _weather_fixes(raw_dir: Path) -> list[dict]:
     from hazecast.ingest.weather import load_weather_bronze
-    files = sorted(glob.glob(str(raw_dir / "*.csv")))
+    files = raw_files(raw_dir / "*.csv")
     rows_in = sum(len(pd.read_csv(f, skiprows=3)) for f in files)
     w = load_weather_bronze(raw_dir)
     dup_hours = rows_in - len(w)

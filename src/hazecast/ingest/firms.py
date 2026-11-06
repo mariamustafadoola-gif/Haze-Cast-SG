@@ -23,7 +23,6 @@ no such column, so it is kept as-is (a small, known source of noise in
 the most recent ~2 months of data).
 """
 from __future__ import annotations
-import glob
 import logging
 import zipfile
 from pathlib import Path
@@ -31,6 +30,7 @@ from pathlib import Path
 import pandas as pd
 
 from hazecast.config import RAW_DIR, BRONZE_DIR, FIRE_REGIONS
+from hazecast.ingest import raw_files
 
 log = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def _tag_region(df: pd.DataFrame) -> pd.Series:
 
 
 def _extract_zips(raw_dir: Path) -> None:
-    for z in glob.glob(str(raw_dir / "*.zip")):
+    for z in raw_files(raw_dir / "*.zip"):
         with zipfile.ZipFile(z) as zf:
             zf.extractall(raw_dir)
         log.info("Extracted %s", z)
@@ -63,8 +63,8 @@ def load_firms_bronze(raw_dir: Path = RAW_DIR / "firms") -> pd.DataFrame:
     Singapore, tz-naive), latitude, longitude, confidence, frp, daynight, region.
     """
     _extract_zips(raw_dir)
-    archive_files = sorted(glob.glob(str(raw_dir / "fire_archive_*.csv")))
-    nrt_files = sorted(glob.glob(str(raw_dir / "fire_nrt_*.csv")))
+    archive_files = raw_files(raw_dir / "fire_archive_*.csv")
+    nrt_files = raw_files(raw_dir / "fire_nrt_*.csv")
     if not archive_files and not nrt_files:
         raise FileNotFoundError(
             f"No FIRMS fire_archive_*.csv or fire_nrt_*.csv found under "

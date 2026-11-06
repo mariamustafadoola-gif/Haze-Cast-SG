@@ -53,3 +53,6 @@ data/monitoring/
 data/gold/*.tmp
 reports/monitoring/
 reports/data_quality/
+
+# submission zip built by tools/make_submission_zip.py
+HazeCast_Group4_code.zip

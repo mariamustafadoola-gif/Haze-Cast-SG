@@ -22,7 +22,7 @@ export PYTHONPATH=src
 `data/raw/`, `data/bronze/`, `data/silver/`, `data/gold/*.parquet`, and
 `data/models/*` are **not** in the repo (see `.gitignore`) -- licences/size,
 not secrecy. Full download steps for the 3 real sources (NEA PM2.5, Open-Meteo
-weather, NASA FIRMS) are in [`data/README.md`](data/README.md). After
+weather, NASA FIRMS) are in [`data/README.md`](../../data/README.md). After
 downloading, reproduce everything with:
 
 ```bash

@@ -40,7 +40,6 @@ File names sort after the original manual downloads, so the ingest step's
 from __future__ import annotations
 
 import argparse
-import glob
 import io
 import json
 import logging
@@ -54,6 +53,7 @@ import requests
 from hazecast.config import RAW_DIR, SG_REGIONS, WEATHER_POINTS, HISTORY_START, WEATHER_REFETCH_DAYS
 from hazecast.ingest import live
 from hazecast.ingest.weather import _nearest_point_name
+from hazecast.ingest import raw_files
 
 log = logging.getLogger(__name__)
 SOURCES = ("pm25", "weather", "firms")
@@ -65,7 +65,7 @@ def _yesterday_sgt() -> date:
 
 def _persistent_files(raw_dir: Path, pattern: str = "*.csv") -> list[str]:
     """Raw files that stay put. *live* files are overwritten every run, so they don't count as history."""
-    return [f for f in sorted(glob.glob(str(raw_dir / pattern))) if "live" not in Path(f).name]
+    return [f for f in raw_files(raw_dir / pattern) if "live" not in Path(f).name]
 
 
 def _days(start: date, end: date) -> list[date]:

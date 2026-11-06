@@ -87,7 +87,7 @@ def backtest_selected_models(
 
 def plot_actual_vs_predicted(
     predictions, *, target="central", horizon=6,
-    start=None, end=None, output_dir=REPO_ROOT / "reports",
+    start=None, end=None, output_dir=REPO_ROOT / "reports" / "figures",
 ):
     """Plot forecast-time-aligned held-out data; start inclusive, end exclusive.
 

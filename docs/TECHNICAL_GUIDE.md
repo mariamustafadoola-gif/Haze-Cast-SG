@@ -31,9 +31,8 @@ any region forecast to cross the NEA "Elevated" band (56 ug/m3).
 
 ## Architecture
 
-This branch (`e2e-pipeline`) joins the data pipeline (`data` branch) and
-the model pipeline (`Model_build_train_inference_monitor` branch) into one
-pipeline orchestrated by Airflow:
+This code joins the data pipeline (`data` branch) and the model pipeline
+(`Model_build_train_inference_monitor` branch) into one pipeline orchestrated by Airflow:
 
 ```
  Sources: data.gov.sg PM2.5 · Open-Meteo weather · NASA FIRMS fires
